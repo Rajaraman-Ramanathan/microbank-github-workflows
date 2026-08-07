@@ -1,0 +1,127 @@
+name: Application Verification
+
+description: >
+  Compiles the application, executes unit tests,
+  generates JaCoCo coverage reports, performs
+  SonarQube analysis and exposes generated
+  report locations for downstream workflows.
+
+author: Microbank Platform Team
+
+inputs:
+  working-directory:
+    description: Maven project root directory.
+    required: false
+    default: "."
+
+  sonar-project-key:
+    description: SonarQube project key.
+    required: true
+
+  maven-goals:
+    description: Maven lifecycle phase to execute.
+    required: false
+    default: "verify"
+
+  additional-args:
+    description: Additional Maven command line arguments.
+    required: false
+    default: ""
+
+outputs:
+  surefire-report-directory:
+    description: Directory containing Surefire XML reports.
+    value: ${{ steps.reports.outputs.surefire-report-directory }}
+
+  jacoco-xml-report:
+    description: JaCoCo XML coverage report.
+    value: ${{ steps.reports.outputs.jacoco-xml-report }}
+
+  jacoco-html-report-directory:
+    description: Directory containing JaCoCo HTML coverage report.
+    value: ${{ steps.reports.outputs.jacoco-html-report-directory }}
+
+  sonar-report-task-file:
+    description: SonarQube report-task.txt file.
+    value: ${{ steps.reports.outputs.sonar-report-task-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Maven Project
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        [[ -f pom.xml ]] || {
+          echo "::error::pom.xml not found."
+          exit 1
+        }
+
+        [[ -f mvnw ]] || {
+          echo "::error::Maven Wrapper (mvnw) not found."
+          exit 1
+        }
+
+        [[ -f .mvn/wrapper/maven-wrapper.properties ]] || {
+          echo "::error::.mvn/wrapper/maven-wrapper.properties not found."
+          exit 1
+        }
+
+        chmod +x mvnw
+
+    - name: Compile, Test, Verify and SonarQube Analysis
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+        SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+      run: |
+        set -euo pipefail
+
+        ./mvnw \
+          ${{ inputs.maven-goals }} \
+          sonar:sonar \
+          -Dsonar.projectKey="${{ inputs.sonar-project-key }}" \
+          -Dsonar.host.url="${SONAR_HOST_URL}" \
+          -Dsonar.token="${SONAR_TOKEN}" \
+          ${{ inputs.additional-args }}
+
+    - name: Verify Generated Reports
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        [[ -d target/surefire-reports ]] || {
+          echo "::error::Surefire reports were not generated."
+          exit 1
+        }
+
+        [[ -f target/site/jacoco/jacoco.xml ]] || {
+          echo "::error::JaCoCo XML report was not generated."
+          exit 1
+        }
+
+        [[ -d target/site/jacoco ]] || {
+          echo "::error::JaCoCo HTML report directory was not generated."
+          exit 1
+        }
+
+        [[ -f target/sonar/report-task.txt ]] || {
+          echo "::error::SonarQube report-task.txt not found."
+          exit 1
+        }
+
+    - name: Expose Report Locations
+      id: reports
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        echo "surefire-report-directory=${PWD}/target/surefire-reports" >> "$GITHUB_OUTPUT"
+        echo "jacoco-xml-report=${PWD}/target/site/jacoco/jacoco.xml" >> "$GITHUB_OUTPUT"
+        echo "jacoco-html-report-directory=${PWD}/target/site/jacoco" >> "$GITHUB_OUTPUT"
+        echo "sonar-report-task-file=${PWD}/target/sonar/report-task.txt" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,107 @@
+name: Gitleaks Scan
+
+description: >
+  Scans the Git repository for hardcoded secrets using the
+  organization's Gitleaks policy and generates a SARIF report
+  for downstream workflow jobs.
+
+author: Microbank Platform Team
+
+inputs:
+  working-directory:
+    description: Repository root directory.
+    required: false
+    default: "."
+
+  config-path:
+    description: >
+      Optional path to a custom Gitleaks configuration file.
+      If omitted, the enterprise policy bundled with the platform
+      repository will be used.
+    required: false
+    default: ""
+
+  report-directory:
+    description: Directory where the Gitleaks report will be generated.
+    required: false
+    default: ".github/reports"
+
+  report-format:
+    description: Report format.
+    required: false
+    default: "sarif"
+
+outputs:
+  report-file:
+    description: Generated Gitleaks report.
+    value: ${{ steps.report.outputs.report-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Enterprise Configuration
+      id: config
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ -n "${{ inputs.config-path }}" ]]; then
+          CONFIG_PATH="${{ inputs.config-path }}"
+        else
+          CONFIG_PATH="${GITHUB_ACTION_PATH}/../../policies/secrets/.gitleaks.toml"
+        fi
+
+        [[ -f "$CONFIG_PATH" ]] || {
+          echo "::error::Gitleaks configuration not found: $CONFIG_PATH"
+          exit 1
+        }
+
+        echo "config-path=$CONFIG_PATH" >> "$GITHUB_OUTPUT"
+
+    - name: Validate Repository
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        [[ -d ".git" ]] || {
+          echo "::error::.git directory not found."
+          exit 1
+        }
+
+    - name: Prepare Report Directory
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p "${{ inputs.report-directory }}"
+
+    - name: Execute Gitleaks Scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        gitleaks detect \
+          --source . \
+          --config "${{ steps.config.outputs.config-path }}" \
+          --report-format "${{ inputs.report-format }}" \
+          --report-path "${{ inputs.report-directory }}/gitleaks.${{ inputs.report-format }}" \
+          --redact
+
+    - name: Verify Generated Report
+      id: report
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        REPORT_FILE="${PWD}/${{ inputs.report-directory }}/gitleaks.${{ inputs.report-format }}"
+
+        [[ -f "$REPORT_FILE" ]] || {
+          echo "::error::Gitleaks report was not generated."
+          exit 1
+        }
+
+        echo "report-file=$REPORT_FILE" >> "$GITHUB_OUTPUT"

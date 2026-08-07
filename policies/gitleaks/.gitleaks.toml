@@ -1,0 +1,45 @@
+title = "Gitleaks Config"
+
+# Define global allowlist rules
+[allowlist]
+description = "Global allowlist"
+regexes = [
+    '''dummyapikey[a-zA-Z0-9]{10,}''',  # allow fake API keys for tests
+    '''^test-[a-zA-Z0-9]+$'''          # allow test tokens
+]
+files = [
+    '''\.env\.example$''',             # ignore .env.example files
+    '''README\.md$''',                 # ignore documentation
+    '''tests/.*$'''                    # ignore test files
+]
+
+# Define custom rules (add your org's patterns here)
+[[rules]]
+id = "AWS-Access-Key"
+description = "AWS Access Key ID"
+regex = '''AKIA[0-9A-Z]{16}'''
+tags = ["key", "AWS"]
+
+[[rules]]
+id = "AWS-Secret-Key"
+description = "AWS Secret Access Key"
+regex = '''(?i)aws(.{0,20})?(?-i)['\"][0-9a-zA-Z\/+]{40}['\"]'''
+tags = ["key", "AWS"]
+
+[[rules]]
+id = "Generic-API-Key"
+description = "Generic API Key"
+regex = '''(?i)(api_key|apikey|secret|token)[\s:=]+['"]?[0-9a-zA-Z\-_.]{16,}['"]?'''
+tags = ["key", "generic"]
+
+[[rules]]
+id = "Private-Key"
+description = "Private Key Block"
+regex = '''-----BEGIN( RSA)? PRIVATE KEY-----'''
+tags = ["private", "key"]
+
+[[rules]]
+id = "Password"
+description = "Hardcoded Password"
+regex = '''(?i)(password|passwd|pwd)['"]?\s*[:=]\s*['"][^'"]{6,}['"]'''
+tags = ["password", "credentials"]
