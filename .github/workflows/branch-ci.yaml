@@ -1,0 +1,101 @@
+name: PR Validation
+
+on:
+  workflow_call:
+
+    inputs:
+
+      java-version:
+        description: Java version used for the build.
+        required: false
+        default: "21"
+        type: string
+
+      working-directory:
+        description: Maven project root.
+        required: false
+        default: "."
+        type: string
+
+      coverage-threshold:
+        description: Minimum JaCoCo coverage percentage.
+        required: false
+        default: 80
+        type: number
+
+      sonar-project-key:
+        description: SonarQube project key.
+        required: true
+        type: string
+
+    secrets:
+
+      SONAR_TOKEN:
+        required: true
+
+      SONAR_HOST_URL:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+
+  build-application:
+
+    name: Build Application
+
+    runs-on: ubuntu-latest
+
+    outputs:
+
+      group-id: ${{ steps.build.outputs.group-id }}
+
+      artifact-id: ${{ steps.build.outputs.artifact-id }}
+
+      project-version: ${{ steps.build.outputs.project-version }}
+
+      artifact-file: ${{ steps.build.outputs.artifact-file }}
+
+      artifact-path: ${{ steps.build.outputs.artifact-path }}
+
+      artifact-name: ${{ steps.artifact.outputs.artifact-name }}
+
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v5
+
+      - name: Setup Java
+        uses: ./actions/setup-java
+        with:
+          java-version: ${{ inputs.java-version }}
+
+      - name: Build Application
+        id: build
+        uses: ./actions/maven-build
+        with:
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Generate Artifact Name
+        id: artifact
+        shell: bash
+        run: |
+          chmod +x scripts/generate-artifact-name.sh
+
+          ARTIFACT_NAME=$(scripts/generate-artifact-name.sh \
+          "${{ steps.build.outputs.artifact-id }}" \
+          "${GITHUB_SHA}")
+
+          echo "artifact-name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Build Artifact
+        uses: ./actions/upload-build-artifact
+        with:
+          artifact-name: ${{ steps.artifact.outputs.artifact-name }}
+          artifact-path: ${{ steps.build.outputs.artifact-path }}

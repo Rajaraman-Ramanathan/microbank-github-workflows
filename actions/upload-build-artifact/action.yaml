@@ -1,0 +1,50 @@
+name: Upload Build Artifact
+
+description: >
+  Uploads build artifacts for use by downstream jobs within the current
+  GitHub Actions workflow.
+
+author: Microbank Platform Team
+
+inputs:
+
+  artifact-name:
+    description: Artifact name.
+    required: true
+
+  artifact-path:
+    description: Path to artifact.
+    required: true
+
+  retention-days:
+    description: GitHub artifact retention period.
+    required: false
+    default: "1"
+
+  compression-level:
+    description: Compression level (0-9).
+    required: false
+    default: "6"
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Artifact
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [ ! -e "${{ inputs.artifact-path }}" ]; then
+          echo "::error::Artifact not found."
+          echo "Path: ${{ inputs.artifact-path }}"
+          exit 1
+        fi
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.artifact-path }}
+        retention-days: ${{ inputs.retention-days }}
+        compression-level: ${{ inputs.compression-level }}
+        if-no-files-found: error

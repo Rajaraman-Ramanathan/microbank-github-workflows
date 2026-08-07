@@ -1,0 +1,45 @@
+name: Download Build Artifact
+
+description: >
+  Downloads a previously uploaded GitHub Actions artifact for
+  downstream workflow jobs.
+
+author: Microbank Platform Team
+
+inputs:
+
+  artifact-name:
+    description: Artifact name.
+    required: true
+
+  destination-path:
+    description: Download destination.
+    required: false
+    default: "artifacts"
+
+runs:
+  using: composite
+  steps:
+    - name: Download Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.destination-path }}
+
+    - name: Verify Download
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [ ! -d "${{ inputs.destination-path }}" ]; then
+          echo "::error::Artifact download failed."
+          exit 1
+        fi
+
+        if [ -z "$(find "${{ inputs.destination-path }}" -type f)" ]; then
+          echo "::error::Downloaded artifact is empty."
+          exit 1
+        fi
+
+        echo "Downloaded artifact contents:"
+        find "${{ inputs.destination-path }}"

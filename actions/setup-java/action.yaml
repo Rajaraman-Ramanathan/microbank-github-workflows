@@ -1,0 +1,40 @@
+name: Setup Java
+
+description: >
+  Configures the Java build environment for Microbank CI/CD workflows.
+
+author: Microbank Platform Team
+
+inputs:
+  java-version:
+    description: Java version to install.
+    required: false
+    default: "21"
+
+  distribution:
+    description: JDK distribution.
+    required: false
+    default: "temurin"
+
+  cache:
+    description: Dependency cache provider.
+    required: false
+    default: "maven"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: ${{ inputs.distribution }}
+        java-version: ${{ inputs.java-version }}
+        cache: ${{ inputs.cache }}
+
+    - name: Verify Java Installation
+      shell: bash
+      run: |
+        test -f mvnw
+        test -f .mvn/wrapper/maven-wrapper.properties
+        java --version
+        ./mvnw --version

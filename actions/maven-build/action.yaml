@@ -1,0 +1,125 @@
+name: Maven Build
+
+description: >
+  Builds a Java application using the Maven Wrapper and produces a trusted
+  executable JAR for downstream workflow jobs.
+
+author: Microbank Platform Team
+
+inputs:
+  working-directory:
+    description: Maven project root directory.
+    required: false
+    default: "."
+
+  goals:
+    description: Maven goals to execute.
+    required: false
+    default: "clean package"
+
+  additional-args:
+    description: Additional Maven command line arguments.
+    required: false
+    default: ""
+
+outputs:
+  group-id:
+    description: Maven groupId.
+    value: ${{ steps.project-metadata.outputs.group-id }}
+
+  artifact-id:
+    description: Maven artifactId.
+    value: ${{ steps.project-metadata.outputs.artifact-id }}
+
+  project-version:
+    description: Maven project version.
+    value: ${{ steps.project-metadata.outputs.project-version }}
+
+  artifact-file:
+    description: Executable JAR filename.
+    value: ${{ steps.locate-jar.outputs.artifact-file }}
+
+  artifact-path:
+    description: Executable JAR path.
+    value: ${{ steps.locate-jar.outputs.artifact-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Maven Project
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        
+        test -f pom.xml || { echo "::error::pom.xml not found."; exit 1; }
+        test -f mvnw || { echo "::error::mvnw not found."; exit 1; }
+        test -f .mvn/wrapper/maven-wrapper.properties || {
+          echo "::error::Maven Wrapper configuration not found."
+          exit 1
+        }
+        chmod +x mvnw
+
+    - name: Read Project Metadata
+      id: project-metadata
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        GROUP_ID=$(./mvnw help:evaluate \
+          -Dexpression=project.groupId \
+          -q \
+          -DforceStdout)
+
+        ARTIFACT_ID=$(./mvnw help:evaluate \
+          -Dexpression=project.artifactId \
+          -q \
+          -DforceStdout)
+
+        VERSION=$(./mvnw help:evaluate \
+          -Dexpression=project.version \
+          -q \
+          -DforceStdout)
+
+        echo "group-id=${GROUP_ID}" >> "$GITHUB_OUTPUT"
+        echo "artifact-id=${ARTIFACT_ID}" >> "$GITHUB_OUTPUT"
+        echo "project-version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Build Application
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        ./mvnw \
+          ${{ inputs.goals }} \
+          -DskipTests \
+          ${{ inputs.additional-args }}
+
+    - name: Locate Executable JAR
+      id: locate-jar
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        ARTIFACT_ID="${{ steps.project-metadata.outputs.artifact-id }}"
+
+        JAR=$(find target \
+          -type f \
+          -name "${ARTIFACT_ID}*.jar" \
+          ! -name "*.original" \
+          ! -name "*-sources.jar" \
+          ! -name "*-javadoc.jar" \
+          | head -n 1)
+
+        if [ -z "${JAR}" ]; then
+          echo "::error::Executable Spring Boot JAR not found."
+          exit 1
+        fi
+
+        echo "artifact-file=$(basename "${JAR}")" >> "$GITHUB_OUTPUT"
+        echo "artifact-path=${JAR}" >> "$GITHUB_OUTPUT"
+
+        echo "Executable JAR: ${JAR}"
