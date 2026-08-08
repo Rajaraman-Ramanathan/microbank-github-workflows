@@ -1,0 +1,271 @@
+name: Snyk SCA
+
+description: >
+  Scans Maven dependencies for known open-source vulnerabilities
+  using Snyk Open Source, generates security reports, and
+  enforces the organization's dependency security threshold.
+
+author: Microbank Platform Team
+
+inputs:
+  working-directory:
+    description: Maven project root directory.
+    required: false
+    default: "."
+
+  organization:
+    description: Snyk organization identifier.
+    required: true
+
+  severity-threshold:
+    description: >
+      Minimum vulnerability severity that causes the Snyk scan
+      to fail. Supported values are low, medium, high, and critical.
+    required: false
+    default: "high"
+
+  report-directory:
+    description: Directory where Snyk reports are generated.
+    required: false
+    default: ".github/reports"
+
+  generate-sarif:
+    description: Whether to generate a SARIF report.
+    required: false
+    default: "true"
+
+  generate-json:
+    description: Whether to generate a JSON report.
+    required: false
+    default: "true"
+
+  maven-aggregate-project:
+    description: >
+      Whether the Maven project is a multi-module aggregate project.
+    required: false
+    default: "false"
+
+  additional-args:
+    description: >
+      Additional Snyk CLI arguments approved by the organization.
+      Arguments must be supplied as a space-separated list.
+    required: false
+    default: ""
+
+outputs:
+  sarif-file:
+    description: Path to the generated Snyk SARIF report.
+    value: ${{ steps.report.outputs.sarif-file }}
+
+  json-file:
+    description: Path to the generated Snyk JSON report.
+    value: ${{ steps.report.outputs.json-file }}
+
+  exit-code:
+    description: Exit code returned by Snyk.
+    value: ${{ steps.scan.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Maven Project
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f "pom.xml" ]]; then
+          echo "::error::pom.xml not found in $PWD."
+          exit 1
+        fi
+
+    - name: Validate Snyk Configuration
+      shell: bash
+      env:
+        SNYK_TOKEN: ${{ env.SNYK_TOKEN }}
+        SNYK_ORGANIZATION: ${{ inputs.organization }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$SNYK_TOKEN" ]]; then
+          echo "::error::SNYK_TOKEN is not configured."
+          exit 1
+        fi
+
+        if [[ -z "$SNYK_ORGANIZATION" ]]; then
+          echo "::error::Snyk organization is not configured."
+          exit 1
+        fi
+
+    - name: Validate Snyk CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v snyk >/dev/null 2>&1; then
+          echo "::error::Snyk CLI is not available on the runner."
+          echo "::error::The calling workflow must install the approved Snyk CLI version."
+          exit 1
+        fi
+
+        echo "Snyk version:"
+        snyk --version
+
+    - name: Prepare Report Directory
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p "$REPORT_DIRECTORY"
+
+    - name: Run Snyk Open Source Scan
+      id: scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SNYK_TOKEN: ${{ env.SNYK_TOKEN }}
+        SNYK_ORGANIZATION: ${{ inputs.organization }}
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        GENERATE_SARIF: ${{ inputs.generate-sarif }}
+        GENERATE_JSON: ${{ inputs.generate-json }}
+        MAVEN_AGGREGATE_PROJECT: ${{ inputs.maven-aggregate-project }}
+        ADDITIONAL_ARGS_INPUT: ${{ inputs.additional-args }}
+      run: |
+        set +e
+
+        SNYK_ARGS=(
+          test
+          --file=pom.xml
+          "--org=${SNYK_ORGANIZATION}"
+          "--severity-threshold=${SEVERITY_THRESHOLD}"
+        )
+
+        if [[ "$MAVEN_AGGREGATE_PROJECT" == "true" ]]; then
+          SNYK_ARGS+=(
+            --maven-aggregate-project
+          )
+        fi
+
+        if [[ "$GENERATE_SARIF" == "true" ]]; then
+          SNYK_ARGS+=(
+            "--sarif-file-output=${REPORT_DIRECTORY}/snyk.sarif"
+          )
+        fi
+
+        if [[ "$GENERATE_JSON" == "true" ]]; then
+          SNYK_ARGS+=(
+            "--json-file-output=${REPORT_DIRECTORY}/snyk.json"
+          )
+        fi
+
+        if [[ -n "$ADDITIONAL_ARGS_INPUT" ]]; then
+          read -r -a ADDITIONAL_ARGS <<< "$ADDITIONAL_ARGS_INPUT"
+          SNYK_ARGS+=("${ADDITIONAL_ARGS[@]}")
+        fi
+
+        snyk "${SNYK_ARGS[@]}"
+
+        EXIT_CODE=$?
+
+        echo "exit-code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+        exit 0
+
+    - name: Verify Generated Reports
+      if: always()
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        GENERATE_SARIF: ${{ inputs.generate-sarif }}
+        GENERATE_JSON: ${{ inputs.generate-json }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$GENERATE_SARIF" == "true" ]]; then
+          SARIF_FILE="${REPORT_DIRECTORY}/snyk.sarif"
+
+          if [[ ! -f "$SARIF_FILE" ]]; then
+            echo "::error::Snyk SARIF report was not generated: $SARIF_FILE"
+            exit 1
+          fi
+
+          if [[ ! -s "$SARIF_FILE" ]]; then
+            echo "::error::Snyk SARIF report is empty: $SARIF_FILE"
+            exit 1
+          fi
+        fi
+
+        if [[ "$GENERATE_JSON" == "true" ]]; then
+          JSON_FILE="${REPORT_DIRECTORY}/snyk.json"
+
+          if [[ ! -f "$JSON_FILE" ]]; then
+            echo "::error::Snyk JSON report was not generated: $JSON_FILE"
+            exit 1
+          fi
+
+          if [[ ! -s "$JSON_FILE" ]]; then
+            echo "::error::Snyk JSON report is empty: $JSON_FILE"
+            exit 1
+          fi
+        fi
+
+    - name: Expose Report Locations
+      if: always()
+      id: report
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        GENERATE_SARIF: ${{ inputs.generate-sarif }}
+        GENERATE_JSON: ${{ inputs.generate-json }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$GENERATE_SARIF" == "true" ]]; then
+          echo "sarif-file=${PWD}/${REPORT_DIRECTORY}/snyk.sarif" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [[ "$GENERATE_JSON" == "true" ]]; then
+          echo "json-file=${PWD}/${REPORT_DIRECTORY}/snyk.json" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Enforce Snyk Security Gate
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        EXIT_CODE="${{ steps.scan.outputs.exit-code }}"
+
+        case "$EXIT_CODE" in
+
+          0)
+            echo "Snyk dependency scan passed."
+            ;;
+
+          1)
+            echo "::error::Snyk found vulnerabilities at or above the configured severity threshold."
+            exit 1
+            ;;
+
+          2)
+            echo "::error::Snyk scan failed due to an execution or configuration error."
+            exit 2
+            ;;
+
+          3)
+            echo "::error::Snyk did not detect a supported project."
+            exit 3
+            ;;
+
+          *)
+            echo "::error::Snyk returned unexpected exit code: $EXIT_CODE"
+            exit "$EXIT_CODE"
+            ;;
+
+        esac

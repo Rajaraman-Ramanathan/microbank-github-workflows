@@ -1,10 +1,9 @@
 name: Application Verification
 
 description: >
-  Compiles the application, executes unit tests,
-  generates JaCoCo coverage reports, performs
-  SonarQube analysis and exposes generated
-  report locations for downstream workflows.
+  Compiles the application, executes unit tests, generates JaCoCo
+  coverage reports, performs SonarQube analysis, and exposes
+  generated report locations for downstream workflows.
 
 author: Microbank Platform Team
 
@@ -19,7 +18,7 @@ inputs:
     required: true
 
   maven-goals:
-    description: Maven lifecycle phase to execute.
+    description: Maven lifecycle goals to execute.
     required: false
     default: "verify"
 
@@ -54,22 +53,49 @@ runs:
       run: |
         set -euo pipefail
 
-        [[ -f pom.xml ]] || {
-          echo "::error::pom.xml not found."
+        if [[ ! -f "pom.xml" ]]; then
+          echo "::error::pom.xml not found in $PWD."
           exit 1
-        }
+        fi
 
-        [[ -f mvnw ]] || {
-          echo "::error::Maven Wrapper (mvnw) not found."
+        if [[ ! -f "mvnw" ]]; then
+          echo "::error::Maven Wrapper (mvnw) not found in $PWD."
           exit 1
-        }
+        fi
 
-        [[ -f .mvn/wrapper/maven-wrapper.properties ]] || {
-          echo "::error::.mvn/wrapper/maven-wrapper.properties not found."
+        if [[ ! -f ".mvn/wrapper/maven-wrapper.properties" ]]; then
+          echo "::error::Maven Wrapper configuration not found."
           exit 1
-        }
+        fi
 
         chmod +x mvnw
+
+        echo "Maven version:"
+        ./mvnw --version
+
+    - name: Validate SonarQube Configuration
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${SONAR_HOST_URL:-}" ]]; then
+          echo "::error::SONAR_HOST_URL is not configured."
+          exit 1
+        fi
+
+        if [[ -z "${SONAR_TOKEN:-}" ]]; then
+          echo "::error::SONAR_TOKEN is not configured."
+          exit 1
+        fi
+
+        if [[ -z "${{ inputs.sonar-project-key }}" ]]; then
+          echo "::error::sonar-project-key input cannot be empty."
+          exit 1
+        fi
+
+      env:
+        SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+        SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
 
     - name: Compile, Test, Verify and SonarQube Analysis
       shell: bash
@@ -77,16 +103,28 @@ runs:
       env:
         SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
         SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        MAVEN_GOALS_INPUT: ${{ inputs.maven-goals }}
+        ADDITIONAL_ARGS_INPUT: ${{ inputs.additional-args }}
+        SONAR_PROJECT_KEY: ${{ inputs.sonar-project-key }}
       run: |
         set -euo pipefail
 
-        ./mvnw \
-          ${{ inputs.maven-goals }} \
-          sonar:sonar \
-          -Dsonar.projectKey="${{ inputs.sonar-project-key }}" \
-          -Dsonar.host.url="${SONAR_HOST_URL}" \
-          -Dsonar.token="${SONAR_TOKEN}" \
-          ${{ inputs.additional-args }}
+        read -r -a MAVEN_GOALS <<< "$MAVEN_GOALS_INPUT"
+
+        MAVEN_ARGS=(
+          "${MAVEN_GOALS[@]}"
+          "sonar:sonar"
+          "-Dsonar.projectKey=${SONAR_PROJECT_KEY}"
+          "-Dsonar.host.url=${SONAR_HOST_URL}"
+          "-Dsonar.token=${SONAR_TOKEN}"
+        )
+
+        if [[ -n "$ADDITIONAL_ARGS_INPUT" ]]; then
+          read -r -a ADDITIONAL_ARGS <<< "$ADDITIONAL_ARGS_INPUT"
+          MAVEN_ARGS+=("${ADDITIONAL_ARGS[@]}")
+        fi
+
+        ./mvnw "${MAVEN_ARGS[@]}"
 
     - name: Verify Generated Reports
       shell: bash
@@ -94,25 +132,40 @@ runs:
       run: |
         set -euo pipefail
 
-        [[ -d target/surefire-reports ]] || {
-          echo "::error::Surefire reports were not generated."
+        if [[ ! -d "target/surefire-reports" ]]; then
+          echo "::error::Surefire report directory was not generated."
           exit 1
-        }
+        fi
 
-        [[ -f target/site/jacoco/jacoco.xml ]] || {
+        if ! find "target/surefire-reports" -type f -print -quit | grep -q .; then
+          echo "::error::Surefire report directory is empty."
+          exit 1
+        fi
+
+        if [[ ! -f "target/site/jacoco/jacoco.xml" ]]; then
           echo "::error::JaCoCo XML report was not generated."
           exit 1
-        }
+        fi
 
-        [[ -d target/site/jacoco ]] || {
+        if [[ ! -s "target/site/jacoco/jacoco.xml" ]]; then
+          echo "::error::JaCoCo XML report is empty."
+          exit 1
+        fi
+
+        if [[ ! -d "target/site/jacoco" ]]; then
           echo "::error::JaCoCo HTML report directory was not generated."
           exit 1
-        }
+        fi
 
-        [[ -f target/sonar/report-task.txt ]] || {
-          echo "::error::SonarQube report-task.txt not found."
+        if [[ ! -f "target/sonar/report-task.txt" ]]; then
+          echo "::error::SonarQube report-task.txt was not generated."
           exit 1
-        }
+        fi
+
+        if [[ ! -s "target/sonar/report-task.txt" ]]; then
+          echo "::error::SonarQube report-task.txt is empty."
+          exit 1
+        fi
 
     - name: Expose Report Locations
       id: reports

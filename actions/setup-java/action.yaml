@@ -31,10 +31,15 @@ runs:
         java-version: ${{ inputs.java-version }}
         cache: ${{ inputs.cache }}
 
-    - name: Verify Java Installation
+    - name: Validate Java Installation
       shell: bash
       run: |
-        test -f mvnw
-        test -f .mvn/wrapper/maven-wrapper.properties
+        set -euo pipefail
+
+        if ! command -v java >/dev/null 2>&1; then
+          echo "::error::Java executable was not found after Java setup."
+          exit 1
+        fi
+
+        echo "Java version:"
         java --version
-        ./mvnw --version

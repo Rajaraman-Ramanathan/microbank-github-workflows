@@ -1,7 +1,7 @@
 name: Gitleaks Scan
 
 description: >
-  Scans the Git repository for hardcoded secrets using the
+  Scans the source repository for hardcoded secrets using the
   organization's Gitleaks policy and generates a SARIF report
   for downstream workflow jobs.
 
@@ -27,7 +27,7 @@ inputs:
     default: ".github/reports"
 
   report-format:
-    description: Report format.
+    description: Gitleaks report format.
     required: false
     default: "sarif"
 
@@ -39,69 +39,130 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Resolve Enterprise Configuration
-      id: config
+    - name: Validate Gitleaks CLI
       shell: bash
       run: |
         set -euo pipefail
 
-        if [[ -n "${{ inputs.config-path }}" ]]; then
-          CONFIG_PATH="${{ inputs.config-path }}"
+        if ! command -v gitleaks >/dev/null 2>&1; then
+          echo "::error::Gitleaks CLI is not available on the runner."
+          echo "::error::The calling workflow must install the approved Gitleaks version."
+          exit 1
+        fi
+
+        echo "Gitleaks version:"
+        gitleaks version
+
+    - name: Resolve Gitleaks Configuration
+      id: config
+      shell: bash
+      env:
+        CONFIG_PATH_INPUT: ${{ inputs.config-path }}
+      run: |
+        set -euo pipefail
+
+        if [[ -n "$CONFIG_PATH_INPUT" ]]; then
+          CONFIG_PATH="$CONFIG_PATH_INPUT"
         else
           CONFIG_PATH="${GITHUB_ACTION_PATH}/../../policies/secrets/.gitleaks.toml"
         fi
 
-        [[ -f "$CONFIG_PATH" ]] || {
+        if [[ ! -f "$CONFIG_PATH" ]]; then
           echo "::error::Gitleaks configuration not found: $CONFIG_PATH"
           exit 1
-        }
+        fi
 
         echo "config-path=$CONFIG_PATH" >> "$GITHUB_OUTPUT"
 
-    - name: Validate Repository
+    - name: Validate Repository Directory
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
 
-        [[ -d ".git" ]] || {
-          echo "::error::.git directory not found."
+        if [[ ! -d "$WORKING_DIRECTORY" ]]; then
+          echo "::error::Gitleaks working directory does not exist: $WORKING_DIRECTORY"
           exit 1
-        }
+        fi
+
+    - name: Validate Report Format
+      shell: bash
+      env:
+        REPORT_FORMAT: ${{ inputs.report-format }}
+      run: |
+        set -euo pipefail
+
+        case "$REPORT_FORMAT" in
+          sarif|json|csv|junit|template)
+            ;;
+          *)
+            echo "::error::Unsupported Gitleaks report format: $REPORT_FORMAT"
+            echo "::error::Supported formats: sarif, json, csv, junit, template."
+            exit 1
+            ;;
+        esac
 
     - name: Prepare Report Directory
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
       run: |
         set -euo pipefail
 
-        mkdir -p "${{ inputs.report-directory }}"
+        mkdir -p "$REPORT_DIRECTORY"
 
     - name: Execute Gitleaks Scan
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        CONFIG_PATH: ${{ steps.config.outputs.config-path }}
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        REPORT_FORMAT: ${{ inputs.report-format }}
       run: |
         set -euo pipefail
+
+        REPORT_FILE="${REPORT_DIRECTORY}/gitleaks.${REPORT_FORMAT}"
 
         gitleaks detect \
           --source . \
-          --config "${{ steps.config.outputs.config-path }}" \
-          --report-format "${{ inputs.report-format }}" \
-          --report-path "${{ inputs.report-directory }}/gitleaks.${{ inputs.report-format }}" \
+          --config "$CONFIG_PATH" \
+          --report-format "$REPORT_FORMAT" \
+          --report-path "$REPORT_FILE" \
           --redact
 
     - name: Verify Generated Report
-      id: report
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        REPORT_FORMAT: ${{ inputs.report-format }}
       run: |
         set -euo pipefail
 
-        REPORT_FILE="${PWD}/${{ inputs.report-directory }}/gitleaks.${{ inputs.report-format }}"
+        REPORT_FILE="${PWD}/${REPORT_DIRECTORY}/gitleaks.${REPORT_FORMAT}"
 
-        [[ -f "$REPORT_FILE" ]] || {
-          echo "::error::Gitleaks report was not generated."
+        if [[ ! -f "$REPORT_FILE" ]]; then
+          echo "::error::Gitleaks report was not generated: $REPORT_FILE"
           exit 1
-        }
+        fi
+
+        if [[ ! -s "$REPORT_FILE" ]]; then
+          echo "::error::Gitleaks report is empty: $REPORT_FILE"
+          exit 1
+        fi
+
+    - name: Expose Report Location
+      id: report
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        REPORT_FORMAT: ${{ inputs.report-format }}
+      run: |
+        set -euo pipefail
+
+        REPORT_FILE="${PWD}/${REPORT_DIRECTORY}/gitleaks.${REPORT_FORMAT}"
 
         echo "report-file=$REPORT_FILE" >> "$GITHUB_OUTPUT"
