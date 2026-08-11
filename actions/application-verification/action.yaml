@@ -75,6 +75,9 @@ runs:
 
     - name: Validate SonarQube Configuration
       shell: bash
+      env:
+        SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+        SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
       run: |
         set -euo pipefail
 
@@ -92,10 +95,6 @@ runs:
           echo "::error::sonar-project-key input cannot be empty."
           exit 1
         fi
-
-      env:
-        SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
 
     - name: Compile, Test, Verify and SonarQube Analysis
       shell: bash
