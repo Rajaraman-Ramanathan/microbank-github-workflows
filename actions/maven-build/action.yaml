@@ -1,7 +1,7 @@
 name: Maven Build
 
 description: >
-  Builds a Java application using the Maven Wrapper and produces a trusted
+  Builds a Java application using the Maven Wrapper and produces an
   executable JAR for downstream workflow jobs.
 
 author: Microbank Platform Team
@@ -45,20 +45,40 @@ outputs:
 
 runs:
   using: composite
+
   steps:
+
     - name: Validate Maven Project
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
-        
-        test -f pom.xml || { echo "::error::pom.xml not found."; exit 1; }
-        test -f mvnw || { echo "::error::mvnw not found."; exit 1; }
-        test -f .mvn/wrapper/maven-wrapper.properties || {
-          echo "::error::Maven Wrapper configuration not found."
+
+        if [[ ! -f "pom.xml" ]]; then
+          echo "::error::pom.xml not found: ${PWD}/pom.xml"
           exit 1
-        }
+        fi
+
+        if [[ ! -f "mvnw" ]]; then
+          echo "::error::Maven Wrapper not found: ${PWD}/mvnw"
+          exit 1
+        fi
+
+        if [[ ! -f ".mvn/wrapper/maven-wrapper.properties" ]]; then
+          echo "::error::Maven Wrapper configuration not found: ${PWD}/.mvn/wrapper/maven-wrapper.properties"
+          exit 1
+        fi
+
+        if ! command -v java >/dev/null 2>&1; then
+          echo "::error::Java runtime is not available on the runner."
+          echo "::error::The calling workflow must configure Java before using this action."
+          exit 1
+        fi
+
         chmod +x mvnw
+
+        java --version
+        ./mvnw --version
 
     - name: Read Project Metadata
       id: project-metadata
@@ -67,59 +87,121 @@ runs:
       run: |
         set -euo pipefail
 
-        GROUP_ID=$(./mvnw help:evaluate \
-          -Dexpression=project.groupId \
-          -q \
-          -DforceStdout)
+        GROUP_ID="$(
+          ./mvnw help:evaluate \
+            -Dexpression=project.groupId \
+            -q \
+            -DforceStdout
+        )"
 
-        ARTIFACT_ID=$(./mvnw help:evaluate \
-          -Dexpression=project.artifactId \
-          -q \
-          -DforceStdout)
+        ARTIFACT_ID="$(
+          ./mvnw help:evaluate \
+            -Dexpression=project.artifactId \
+            -q \
+            -DforceStdout
+        )"
 
-        VERSION=$(./mvnw help:evaluate \
-          -Dexpression=project.version \
-          -q \
-          -DforceStdout)
+        VERSION="$(
+          ./mvnw help:evaluate \
+            -Dexpression=project.version \
+            -q \
+            -DforceStdout
+        )"
 
-        echo "group-id=${GROUP_ID}" >> "$GITHUB_OUTPUT"
-        echo "artifact-id=${ARTIFACT_ID}" >> "$GITHUB_OUTPUT"
-        echo "project-version=${VERSION}" >> "$GITHUB_OUTPUT"
+        if [[ -z "$GROUP_ID" ]]; then
+          echo "::error::Maven project groupId could not be determined."
+          exit 1
+        fi
+
+        if [[ -z "$ARTIFACT_ID" ]]; then
+          echo "::error::Maven project artifactId could not be determined."
+          exit 1
+        fi
+
+        if [[ -z "$VERSION" ]]; then
+          echo "::error::Maven project version could not be determined."
+          exit 1
+        fi
+
+        echo "group-id=$GROUP_ID" >> "$GITHUB_OUTPUT"
+        echo "artifact-id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+        echo "project-version=$VERSION" >> "$GITHUB_OUTPUT"
+
+        echo "Maven groupId: $GROUP_ID"
+        echo "Maven artifactId: $ARTIFACT_ID"
+        echo "Maven version: $VERSION"
 
     - name: Build Application
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        MAVEN_GOALS: ${{ inputs.goals }}
+        MAVEN_ADDITIONAL_ARGS: ${{ inputs.additional-args }}
       run: |
         set -euo pipefail
 
-        ./mvnw \
-          ${{ inputs.goals }} \
-          -DskipTests \
-          ${{ inputs.additional-args }}
+        read -r -a GOALS <<< "$MAVEN_GOALS"
+
+        MAVEN_ARGS=(
+          "${GOALS[@]}"
+          "-DskipTests"
+        )
+
+        if [[ -n "$MAVEN_ADDITIONAL_ARGS" ]]; then
+          read -r -a ADDITIONAL_ARGS <<< "$MAVEN_ADDITIONAL_ARGS"
+          MAVEN_ARGS+=("${ADDITIONAL_ARGS[@]}")
+        fi
+
+        ./mvnw "${MAVEN_ARGS[@]}"
 
     - name: Locate Executable JAR
       id: locate-jar
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        ARTIFACT_ID: ${{ steps.project-metadata.outputs.artifact-id }}
       run: |
         set -euo pipefail
 
-        ARTIFACT_ID="${{ steps.project-metadata.outputs.artifact-id }}"
-
-        JAR=$(find target \
-          -type f \
-          -name "${ARTIFACT_ID}*.jar" \
-          ! -name "*.original" \
-          ! -name "*-sources.jar" \
-          ! -name "*-javadoc.jar" \
-          | head -n 1)
-
-        if [ -z "${JAR}" ]; then
-          echo "::error::Executable Spring Boot JAR not found."
+        if [[ ! -d "target" ]]; then
+          echo "::error::Maven target directory was not generated."
           exit 1
         fi
 
-        echo "artifact-file=$(basename "${JAR}")" >> "$GITHUB_OUTPUT"
-        echo "artifact-path=${JAR}" >> "$GITHUB_OUTPUT"
+        mapfile -t JARS < <(
+          find target \
+            -maxdepth 1 \
+            -type f \
+            -name "${ARTIFACT_ID}-*.jar" \
+            ! -name "*.original" \
+            ! -name "*-sources.jar" \
+            ! -name "*-javadoc.jar" \
+            -print
+        )
 
-        echo "Executable JAR: ${JAR}"
+        if [[ "${#JARS[@]}" -eq 0 ]]; then
+          echo "::error::Executable JAR not found for Maven artifact: ${ARTIFACT_ID}"
+          exit 1
+        fi
+
+        if [[ "${#JARS[@]}" -gt 1 ]]; then
+          echo "::error::Multiple executable JAR candidates were found:"
+          printf '::error::  %s\n' "${JARS[@]}"
+          echo "::error::The Maven build must produce exactly one executable JAR."
+          exit 1
+        fi
+
+        JAR="${JARS[0]}"
+
+        if [[ ! -s "$JAR" ]]; then
+          echo "::error::Executable JAR is empty: $JAR"
+          exit 1
+        fi
+
+        ARTIFACT_PATH="$(realpath "$JAR")"
+        ARTIFACT_FILE="$(basename "$JAR")"
+
+        echo "artifact-file=$ARTIFACT_FILE" >> "$GITHUB_OUTPUT"
+        echo "artifact-path=$ARTIFACT_PATH" >> "$GITHUB_OUTPUT"
+
+        echo "Executable JAR: $ARTIFACT_PATH"

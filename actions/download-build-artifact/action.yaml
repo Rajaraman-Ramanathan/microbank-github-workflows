@@ -7,7 +7,6 @@ description: >
 author: Microbank Platform Team
 
 inputs:
-
   artifact-name:
     description: Artifact name.
     required: true
@@ -28,18 +27,26 @@ runs:
 
     - name: Verify Download
       shell: bash
+      env:
+        DESTINATION_PATH: ${{ inputs.destination-path }}
       run: |
         set -euo pipefail
 
-        if [ ! -d "${{ inputs.destination-path }}" ]; then
-          echo "::error::Artifact download failed."
+        if [[ ! -d "$DESTINATION_PATH" ]]; then
+          echo "::error::Artifact download directory was not created: $DESTINATION_PATH"
           exit 1
         fi
 
-        if [ -z "$(find "${{ inputs.destination-path }}" -type f)" ]; then
-          echo "::error::Downloaded artifact is empty."
+        mapfile -t FILES < <(
+          find "$DESTINATION_PATH" \
+            -type f \
+            -print
+        )
+
+        if [[ "${#FILES[@]}" -eq 0 ]]; then
+          echo "::error::Downloaded artifact is empty: $DESTINATION_PATH"
           exit 1
         fi
 
         echo "Downloaded artifact contents:"
-        find "${{ inputs.destination-path }}"
+        printf '%s\n' "${FILES[@]}"

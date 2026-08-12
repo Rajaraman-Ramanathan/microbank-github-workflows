@@ -1,0 +1,189 @@
+name: JAR Verification
+
+description: >
+  Validates a Java JAR artifact, verifies its archive structure and
+  application layout, generates a SHA-256 checksum, and optionally
+  verifies the artifact against an expected checksum.
+
+author: Microbank Platform Team
+
+inputs:
+  jar-path:
+    description: Path to the JAR artifact.
+    required: true
+
+  checksum-path:
+    description: Path where the SHA-256 checksum file will be generated.
+    required: false
+    default: ""
+
+  expected-sha256:
+    description: >
+      Expected SHA-256 checksum of the JAR. When provided, the calculated
+      checksum must match this value.
+    required: false
+    default: ""
+
+  verify-spring-boot:
+    description: >
+      Whether to verify the expected Spring Boot executable JAR structure.
+    required: false
+    default: "true"
+
+outputs:
+  jar-file:
+    description: Absolute path to the verified JAR.
+    value: ${{ steps.verify.outputs.jar-file }}
+
+  sha256:
+    description: SHA-256 checksum of the verified JAR.
+    value: ${{ steps.verify.outputs.sha256 }}
+
+  checksum-file:
+    description: Absolute path to the generated SHA-256 checksum file.
+    value: ${{ steps.verify.outputs.checksum-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate JAR Path
+      shell: bash
+      env:
+        JAR_PATH: ${{ inputs.jar-path }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f "$JAR_PATH" ]]; then
+          echo "::error::JAR file was not found: $JAR_PATH"
+          exit 1
+        fi
+
+        if [[ ! -s "$JAR_PATH" ]]; then
+          echo "::error::JAR file is empty: $JAR_PATH"
+          exit 1
+        fi
+
+    - name: Validate Java Runtime
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v java >/dev/null 2>&1; then
+          echo "::error::Java runtime is not available on the runner."
+          echo "::error::The calling workflow must configure Java before using this action."
+          exit 1
+        fi
+
+        if ! command -v jar >/dev/null 2>&1; then
+          echo "::error::JAR tool is not available on the runner."
+          echo "::error::The calling workflow must configure a JDK before using this action."
+          exit 1
+        fi
+
+        java --version
+        jar --version
+
+    - name: Validate JAR Archive
+      shell: bash
+      env:
+        JAR_PATH: ${{ inputs.jar-path }}
+      run: |
+        set -euo pipefail
+
+        if ! jar tf "$JAR_PATH" >/dev/null; then
+          echo "::error::JAR archive is invalid or corrupted: $JAR_PATH"
+          exit 1
+        fi
+
+    - name: Validate JAR Manifest
+      shell: bash
+      env:
+        JAR_PATH: ${{ inputs.jar-path }}
+      run: |
+        set -euo pipefail
+
+        if ! jar xf "$JAR_PATH" META-INF/MANIFEST.MF 2>/dev/null; then
+          echo "::error::JAR manifest could not be extracted: $JAR_PATH"
+          exit 1
+        fi
+
+        if [[ ! -s META-INF/MANIFEST.MF ]]; then
+          echo "::error::JAR manifest is missing or empty: $JAR_PATH"
+          exit 1
+        fi
+
+        rm -rf META-INF
+
+    - name: Validate Spring Boot Executable Structure
+      if: inputs.verify-spring-boot == 'true'
+      shell: bash
+      env:
+        JAR_PATH: ${{ inputs.jar-path }}
+      run: |
+        set -euo pipefail
+
+        if ! jar tf "$JAR_PATH" | grep -q '^BOOT-INF/classes/'; then
+          echo "::error::Spring Boot executable JAR does not contain BOOT-INF/classes/: $JAR_PATH"
+          exit 1
+        fi
+
+        if ! jar tf "$JAR_PATH" | grep -q '^BOOT-INF/lib/'; then
+          echo "::error::Spring Boot executable JAR does not contain BOOT-INF/lib/: $JAR_PATH"
+          exit 1
+        fi
+
+        if ! jar tf "$JAR_PATH" | grep -q '^META-INF/MANIFEST.MF$'; then
+          echo "::error::Spring Boot executable JAR does not contain META-INF/MANIFEST.MF: $JAR_PATH"
+          exit 1
+        fi
+
+    - name: Calculate SHA-256
+      id: verify
+      shell: bash
+      env:
+        JAR_PATH: ${{ inputs.jar-path }}
+        CHECKSUM_PATH: ${{ inputs.checksum-path }}
+        EXPECTED_SHA256: ${{ inputs.expected-sha256 }}
+      run: |
+        set -euo pipefail
+
+        JAR_FILE="$(realpath "$JAR_PATH")"
+        SHA256="$(sha256sum "$JAR_FILE" | awk '{print $1}')"
+
+        if [[ -z "$CHECKSUM_PATH" ]]; then
+          CHECKSUM_FILE="${JAR_FILE}.sha256"
+        else
+          CHECKSUM_FILE="$CHECKSUM_PATH"
+        fi
+
+        CHECKSUM_FILE="$(realpath -m "$CHECKSUM_FILE")"
+
+        CHECKSUM_DIRECTORY="$(dirname "$CHECKSUM_FILE")"
+
+        if [[ ! -d "$CHECKSUM_DIRECTORY" ]]; then
+          mkdir -p "$CHECKSUM_DIRECTORY"
+        fi
+
+        printf '%s  %s\n' "$SHA256" "$(basename "$JAR_FILE")" > "$CHECKSUM_FILE"
+
+        if [[ -n "$EXPECTED_SHA256" ]]; then
+          NORMALIZED_EXPECTED="$(printf '%s' "$EXPECTED_SHA256" | tr '[:upper:]' '[:lower:]')"
+          NORMALIZED_ACTUAL="$(printf '%s' "$SHA256" | tr '[:upper:]' '[:lower:]')"
+
+          if [[ "$NORMALIZED_ACTUAL" != "$NORMALIZED_EXPECTED" ]]; then
+            echo "::error::JAR SHA-256 checksum does not match the expected checksum."
+            echo "::error::Expected: $NORMALIZED_EXPECTED"
+            echo "::error::Actual:   $NORMALIZED_ACTUAL"
+            exit 1
+          fi
+
+          echo "JAR SHA-256 checksum verified successfully."
+        fi
+
+        echo "Verified JAR: $JAR_FILE"
+        echo "SHA-256: $SHA256"
+        echo "Checksum file: $CHECKSUM_FILE"
+
+        echo "jar-file=$JAR_FILE" >> "$GITHUB_OUTPUT"
+        echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+        echo "checksum-file=$CHECKSUM_FILE" >> "$GITHUB_OUTPUT"

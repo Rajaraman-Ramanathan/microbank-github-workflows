@@ -7,13 +7,12 @@ description: >
 author: Microbank Platform Team
 
 inputs:
-
   artifact-name:
     description: Artifact name.
     required: true
 
   artifact-path:
-    description: Path to artifact.
+    description: Path to the artifact or artifact directory.
     required: true
 
   retention-days:
@@ -31,12 +30,13 @@ runs:
   steps:
     - name: Validate Artifact
       shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact-path }}
       run: |
         set -euo pipefail
 
-        if [ ! -e "${{ inputs.artifact-path }}" ]; then
-          echo "::error::Artifact not found."
-          echo "Path: ${{ inputs.artifact-path }}"
+        if [[ ! -e "$ARTIFACT_PATH" ]]; then
+          echo "::error::Artifact was not found: $ARTIFACT_PATH"
           exit 1
         fi
 
