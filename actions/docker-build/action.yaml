@@ -1,0 +1,129 @@
+name: Docker Build
+
+description: >
+  Builds a container image from the application Dockerfile using the
+  previously verified JAR artifact.
+
+author: Microbank Platform Team
+
+inputs:
+  context:
+    description: Docker build context directory.
+    required: false
+    default: "."
+
+  dockerfile:
+    description: Path to the Dockerfile relative to the build context.
+    required: false
+    default: "Dockerfile"
+
+  image-name:
+    description: Container image name without registry or tag.
+    required: true
+
+  image-tag:
+    description: Container image tag.
+    required: true
+
+  jar-path:
+    description: Path to the verified JAR relative to the build context.
+    required: true
+
+  build-args:
+    description: Additional Docker build arguments.
+    required: false
+    default: ""
+
+outputs:
+  image:
+    description: Fully qualified local container image reference.
+    value: ${{ steps.build.outputs.image }}
+
+  image-name:
+    description: Container image name.
+    value: ${{ steps.build.outputs.image-name }}
+
+  image-tag:
+    description: Container image tag.
+    value: ${{ steps.build.outputs.image-tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Docker Build Context
+      shell: bash
+      env:
+        CONTEXT: ${{ inputs.context }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        JAR_PATH: ${{ inputs.jar-path }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -d "$CONTEXT" ]]; then
+          echo "::error::Docker build context was not found: $CONTEXT"
+          exit 1
+        fi
+
+        if [[ ! -f "$CONTEXT/$DOCKERFILE" ]]; then
+          echo "::error::Dockerfile was not found: $CONTEXT/$DOCKERFILE"
+          exit 1
+        fi
+
+        if [[ ! -f "$CONTEXT/$JAR_PATH" ]]; then
+          echo "::error::Verified JAR was not found: $CONTEXT/$JAR_PATH"
+          exit 1
+        fi
+
+        if [[ ! -s "$CONTEXT/$JAR_PATH" ]]; then
+          echo "::error::Verified JAR is empty: $CONTEXT/$JAR_PATH"
+          exit 1
+        fi
+
+    - name: Validate Docker CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "::error::Docker CLI is not available on the runner."
+          exit 1
+        fi
+
+        docker --version
+
+    - name: Build Container Image
+      id: build
+      shell: bash
+      env:
+        CONTEXT: ${{ inputs.context }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        JAR_PATH: ${{ inputs.jar-path }}
+        ADDITIONAL_BUILD_ARGS: ${{ inputs.build-args }}
+      run: |
+        set -euo pipefail
+
+        IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
+
+        DOCKER_ARGS=(
+          build
+          --file "$DOCKERFILE"
+          --tag "$IMAGE"
+          --build-arg "JAR_FILE=$JAR_PATH"
+        )
+
+        if [[ -n "$ADDITIONAL_BUILD_ARGS" ]]; then
+          read -r -a EXTRA_BUILD_ARGS <<< "$ADDITIONAL_BUILD_ARGS"
+          DOCKER_ARGS+=("${EXTRA_BUILD_ARGS[@]}")
+        fi
+
+        DOCKER_ARGS+=("$CONTEXT")
+
+        docker "${DOCKER_ARGS[@]}"
+
+        echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+        echo "image-name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+        echo "image-tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+        echo "Container image built successfully: $IMAGE"

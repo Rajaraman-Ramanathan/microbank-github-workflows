@@ -1,0 +1,149 @@
+name: Container Verification
+
+description: >
+  Verifies the locally built container image before vulnerability scanning
+  and publication.
+
+author: Microbank Platform Team
+
+inputs:
+  image:
+    description: Local container image reference to verify.
+    required: true
+
+  expected-user:
+    description: >
+      Expected container runtime user. When provided, the image must
+      specify the expected non-root user.
+    required: false
+    default: ""
+
+outputs:
+  image-id:
+    description: Image ID.
+    value: ${{ steps.verify.outputs.image-id }}
+
+  image-digest:
+    description: Image content digest when available.
+    value: ${{ steps.verify.outputs.image-digest }}
+
+  image-size:
+    description: Image size in bytes.
+    value: ${{ steps.verify.outputs.image-size }}
+
+runs:
+  using: composite
+
+  steps:
+
+    - name: Validate Docker CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "::error::Docker CLI is not available on the runner."
+          exit 1
+        fi
+
+        docker --version
+
+    - name: Verify Container Image
+      id: verify
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        EXPECTED_USER: ${{ inputs.expected-user }}
+      run: |
+        set -euo pipefail
+
+        if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+          echo "::error::Container image was not found locally: $IMAGE"
+          exit 1
+        fi
+
+        IMAGE_ID="$(
+          docker image inspect \
+            --format '{{.Id}}' \
+            "$IMAGE"
+        )"
+
+        IMAGE_SIZE="$(
+          docker image inspect \
+            --format '{{.Size}}' \
+            "$IMAGE"
+        )"
+
+        IMAGE_DIGEST="$(
+          docker image inspect \
+            --format '{{index .RepoDigests 0}}' \
+            "$IMAGE" 2>/dev/null || true
+        )"
+
+        if [[ -z "$IMAGE_ID" ]]; then
+          echo "::error::Container image ID is empty: $IMAGE"
+          exit 1
+        fi
+
+        if [[ -z "$IMAGE_SIZE" || "$IMAGE_SIZE" -eq 0 ]]; then
+          echo "::error::Container image size is empty or zero: $IMAGE"
+          exit 1
+        fi
+
+        if [[ -n "$EXPECTED_USER" ]]; then
+          IMAGE_USER="$(
+            docker image inspect \
+              --format '{{.Config.User}}' \
+              "$IMAGE"
+          )"
+
+          if [[ "$IMAGE_USER" != "$EXPECTED_USER" ]]; then
+            echo "::error::Container runtime user does not match expectation."
+            echo "::error::Expected: $EXPECTED_USER"
+            echo "::error::Actual: ${IMAGE_USER:-<empty>}"
+            exit 1
+          fi
+        fi
+
+        echo "image-id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+        echo "image-size=$IMAGE_SIZE" >> "$GITHUB_OUTPUT"
+
+        if [[ -n "$IMAGE_DIGEST" ]]; then
+          echo "image-digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "Container image verified successfully."
+        echo "Image: $IMAGE"
+        echo "Image ID: $IMAGE_ID"
+        echo "Image size: $IMAGE_SIZE bytes"
+
+        if [[ -n "$IMAGE_DIGEST" ]]; then
+          echo "Image digest: $IMAGE_DIGEST"
+        fi
+
+    - name: Verify Container Configuration
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+
+        ENTRYPOINT="$(
+          docker image inspect \
+            --format '{{json .Config.Entrypoint}}' \
+            "$IMAGE"
+        )"
+
+        CMD="$(
+          docker image inspect \
+            --format '{{json .Config.Cmd}}' \
+            "$IMAGE"
+        )"
+
+        if [[ "$ENTRYPOINT" == "null" && "$CMD" == "null" ]]; then
+          echo "::error::Container image has neither an ENTRYPOINT nor a CMD: $IMAGE"
+          exit 1
+        fi
+
+        echo "Container entrypoint: $ENTRYPOINT"
+        echo "Container command: $CMD"
