@@ -1,0 +1,160 @@
+name: Publish Docker Image
+
+description: >
+  Publishes a previously built and security-gated container image to
+  Amazon ECR and exposes the published immutable image digest.
+
+author: Microbank Platform Team
+
+inputs:
+  image:
+    description: Local container image reference to publish.
+    required: true
+
+  registry:
+    description: Amazon ECR registry hostname.
+    required: true
+
+  repository:
+    description: Amazon ECR repository name.
+    required: true
+
+  tag:
+    description: Container image tag to publish.
+    required: true
+
+outputs:
+  image:
+    description: Fully qualified published ECR image reference.
+    value: ${{ steps.publish.outputs.image }}
+
+  image-digest:
+    description: Immutable ECR image digest.
+    value: ${{ steps.publish.outputs.image-digest }}
+
+  image-reference:
+    description: Immutable ECR image reference including digest.
+    value: ${{ steps.publish.outputs.image-reference }}
+
+runs:
+  using: composite
+
+  steps:
+
+    - name: Validate Docker CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "::error::Docker CLI is not available on the runner."
+          exit 1
+        fi
+
+        docker --version
+
+    - name: Validate ECR Configuration
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REPOSITORY: ${{ inputs.repository }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$REGISTRY" ]]; then
+          echo "::error::ECR registry must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$REPOSITORY" ]]; then
+          echo "::error::ECR repository must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$TAG" ]]; then
+          echo "::error::ECR image tag must not be empty."
+          exit 1
+        fi
+
+    - name: Validate Local Image
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -n "$IMAGE" ]]; then
+          echo "::error::Local container image reference must not be empty."
+          exit 1
+        fi
+
+        if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+          echo "::error::Container image was not found locally: $IMAGE"
+          exit 1
+        fi
+
+    - name: Prepare ECR Image Reference
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        REGISTRY: ${{ inputs.registry }}
+        REPOSITORY: ${{ inputs.repository }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+
+        TARGET_IMAGE="${REGISTRY%/}/${REPOSITORY}:${TAG}"
+
+        echo "ECR image: $TARGET_IMAGE"
+
+        if [[ "$IMAGE" == "$TARGET_IMAGE" ]]; then
+          echo "Local image is already tagged for the target ECR repository."
+          exit 0
+        fi
+
+        docker tag "$IMAGE" "$TARGET_IMAGE"
+
+    - name: Publish Image
+      id: publish
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REPOSITORY: ${{ inputs.repository }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+
+        TARGET_IMAGE="${REGISTRY%/}/${REPOSITORY}:${TAG}"
+
+        echo "Publishing container image: $TARGET_IMAGE"
+
+        PUSH_OUTPUT="$(docker push "$TARGET_IMAGE" 2>&1)" || {
+          echo "$PUSH_OUTPUT"
+          echo "::error::Failed to publish container image to ECR: $TARGET_IMAGE"
+          exit 1
+        }
+
+        echo "$PUSH_OUTPUT"
+
+        IMAGE_DIGEST="$(
+          printf '%s\n' "$PUSH_OUTPUT" |
+          sed -n 's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' |
+          tail -n 1
+        )"
+
+        if [[ -z "$IMAGE_DIGEST" ]]; then
+          echo "::error::ECR image digest was not returned by docker push."
+          exit 1
+        fi
+
+        IMAGE_REFERENCE="${TARGET_IMAGE%:*}@${IMAGE_DIGEST}"
+
+        echo "image=$TARGET_IMAGE" >> "$GITHUB_OUTPUT"
+        echo "image-digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+        echo "image-reference=$IMAGE_REFERENCE" >> "$GITHUB_OUTPUT"
+
+        echo "Container image published successfully."
+        echo "Image: $TARGET_IMAGE"
+        echo "Digest: $IMAGE_DIGEST"
+        echo "Immutable reference: $IMAGE_REFERENCE"

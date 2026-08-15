@@ -1,0 +1,202 @@
+name: Publish JAR
+
+description: >
+  Publishes a verified Java application JAR to JFrog Artifactory using
+  Maven-compatible repository coordinates and optionally publishes
+  associated JFrog build information.
+
+author: Microbank Platform Team
+
+inputs:
+  artifact-path:
+    description: Path to the verified executable JAR.
+    required: true
+
+  repository:
+    description: JFrog Artifactory Maven repository key.
+    required: true
+
+  group-id:
+    description: Maven groupId.
+    required: true
+
+  artifact-id:
+    description: Maven artifactId.
+    required: true
+
+  version:
+    description: Maven project version.
+    required: true
+
+  server-id:
+    description: JFrog CLI server configuration identifier.
+    required: false
+    default: "setup-jfrog-cli-server"
+
+  build-name:
+    description: >
+      Optional JFrog build-info name. When provided together with
+      build-number, build information is published to Artifactory.
+    required: false
+    default: ""
+
+  build-number:
+    description: >
+      Optional JFrog build-info number. When provided together with
+      build-name, build information is published to Artifactory.
+    required: false
+    default: ""
+
+  project-key:
+    description: Optional JFrog project key.
+    required: false
+    default: ""
+
+outputs:
+  repository-path:
+    description: Repository-relative path of the published JAR.
+    value: ${{ steps.publish.outputs.repository-path }}
+
+runs:
+  using: composite
+
+  steps:
+
+    - name: Validate JFrog CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v jf >/dev/null 2>&1; then
+          echo "::error::JFrog CLI is not available on the runner."
+          echo "::error::The calling workflow must install and configure the approved JFrog CLI version."
+          exit 1
+        fi
+
+        jf --version
+
+    - name: Validate JFrog Configuration
+      shell: bash
+      env:
+        SERVER_ID: ${{ inputs.server-id }}
+      run: |
+        set -euo pipefail
+
+        if ! jf config show "$SERVER_ID" >/dev/null 2>&1; then
+          echo "::error::JFrog CLI server configuration was not found: $SERVER_ID"
+          exit 1
+        fi
+
+        if ! jf rt ping --server-id="$SERVER_ID" >/dev/null 2>&1; then
+          echo "::error::Unable to connect to JFrog Artifactory using server configuration: $SERVER_ID"
+          exit 1
+        fi
+
+    - name: Validate JAR Artifact
+      shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact-path }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f "$ARTIFACT_PATH" ]]; then
+          echo "::error::JAR artifact was not found: $ARTIFACT_PATH"
+          exit 1
+        fi
+
+        if [[ ! -s "$ARTIFACT_PATH" ]]; then
+          echo "::error::JAR artifact is empty: $ARTIFACT_PATH"
+          exit 1
+        fi
+
+    - name: Publish JAR
+      id: publish
+      shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact-path }}
+        REPOSITORY: ${{ inputs.repository }}
+        GROUP_ID: ${{ inputs.group-id }}
+        ARTIFACT_ID: ${{ inputs.artifact-id }}
+        VERSION: ${{ inputs.version }}
+        SERVER_ID: ${{ inputs.server-id }}
+        BUILD_NAME: ${{ inputs.build-name }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        PROJECT_KEY: ${{ inputs.project-key }}
+      run: |
+        set -euo pipefail
+
+        GROUP_PATH="${GROUP_ID//.//}"
+        ARTIFACT_FILE="${ARTIFACT_ID}-${VERSION}.jar"
+
+        REPOSITORY_PATH="${REPOSITORY}/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_FILE}"
+
+        JFROG_ARGS=(
+          rt
+          upload
+          "$ARTIFACT_PATH"
+          "$REPOSITORY_PATH"
+          "--server-id=$SERVER_ID"
+          "--flat=true"
+          "--fail-no-op"
+        )
+
+        if [[ -n "$BUILD_NAME" && -n "$BUILD_NUMBER" ]]; then
+          JFROG_ARGS+=(
+            "--build-name=$BUILD_NAME"
+            "--build-number=$BUILD_NUMBER"
+          )
+
+          if [[ -n "$PROJECT_KEY" ]]; then
+            JFROG_ARGS+=(
+              "--project=$PROJECT_KEY"
+            )
+          fi
+        fi
+
+        jf "${JFROG_ARGS[@]}"
+
+        if ! jf rt search \
+          "$REPOSITORY_PATH" \
+          --server-id="$SERVER_ID" \
+          --fail-no-op \
+          >/dev/null 2>&1; then
+          echo "::error::Published JAR could not be verified in JFrog Artifactory: $REPOSITORY_PATH"
+          exit 1
+        fi
+
+        echo "repository-path=$REPOSITORY_PATH" >> "$GITHUB_OUTPUT"
+        echo "JAR published successfully."
+        echo "Repository path: $REPOSITORY_PATH"
+
+    - name: Publish JFrog Build Information
+      if: inputs.build-name != '' && inputs.build-number != ''
+      shell: bash
+      env:
+        SERVER_ID: ${{ inputs.server-id }}
+        BUILD_NAME: ${{ inputs.build-name }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        PROJECT_KEY: ${{ inputs.project-key }}
+        BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+
+        BUILD_ARGS=(
+          rt
+          build-publish
+          "$BUILD_NAME"
+          "$BUILD_NUMBER"
+          "--server-id=$SERVER_ID"
+          "--build-url=$BUILD_URL"
+        )
+
+        if [[ -n "$PROJECT_KEY" ]]; then
+          BUILD_ARGS+=(
+            "--project=$PROJECT_KEY"
+          )
+        fi
+
+        jf "${BUILD_ARGS[@]}"
+
+        echo "JFrog build information published."
+        echo "Build name: $BUILD_NAME"
+        echo "Build number: $BUILD_NUMBER"

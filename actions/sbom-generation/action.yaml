@@ -1,0 +1,160 @@
+name: SBOM Generation
+
+description: >
+  Generates a Software Bill of Materials for a locally built container
+  image using Trivy.
+
+author: Microbank Platform Team
+
+inputs:
+  image:
+    description: Local container image reference for SBOM generation.
+    required: true
+
+  report-directory:
+    description: Directory where SBOM reports are generated.
+    required: false
+    default: ".github/reports"
+
+  generate-cyclonedx:
+    description: Whether to generate a CycloneDX JSON SBOM.
+    required: false
+    default: "true"
+
+  generate-spdx:
+    description: Whether to generate an SPDX JSON SBOM.
+    required: false
+    default: "false"
+
+  trivy-version:
+    description: >
+      Approved Trivy CLI version. Pin the underlying action to an
+      immutable commit SHA for production use.
+    required: false
+    default: "v0.72.0"
+
+outputs:
+  cyclonedx-file:
+    description: Path to the generated CycloneDX SBOM.
+    value: ${{ steps.outputs.outputs.cyclonedx-file }}
+
+  spdx-file:
+    description: Path to the generated SPDX JSON SBOM.
+    value: ${{ steps.outputs.outputs.spdx-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Container Image
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "::error::Docker CLI is not available on the runner."
+          exit 1
+        fi
+
+        if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+          echo "::error::Container image was not found locally: $IMAGE"
+          exit 1
+        fi
+
+    - name: Prepare Report Directory
+      shell: bash
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p "$REPORT_DIRECTORY"
+
+    - name: Setup Trivy
+      uses: aquasecurity/setup-trivy@v0.2.6
+      with:
+        version: ${{ inputs.trivy-version }}
+
+    - name: Generate CycloneDX SBOM
+      if: inputs.generate-cyclonedx == 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+      run: |
+        set -euo pipefail
+
+        trivy image \
+          --format cyclonedx \
+          --output "${REPORT_DIRECTORY}/container-sbom.cdx.json" \
+          "$IMAGE"
+
+    - name: Generate SPDX SBOM
+      if: inputs.generate-spdx == 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+      run: |
+        set -euo pipefail
+
+        trivy image \
+          --format spdx-json \
+          --output "${REPORT_DIRECTORY}/container-sbom.spdx.json" \
+          "$IMAGE"
+
+    - name: Verify Generated SBOM
+      shell: bash
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        GENERATE_CYCLONEDX: ${{ inputs.generate-cyclonedx }}
+        GENERATE_SPDX: ${{ inputs.generate-spdx }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$GENERATE_CYCLONEDX" == "true" ]]; then
+          CYCLONEDX_FILE="${GITHUB_WORKSPACE}/${REPORT_DIRECTORY}/container-sbom.cdx.json"
+
+          if [[ ! -f "$CYCLONEDX_FILE" ]]; then
+            echo "::error::CycloneDX SBOM was not generated: $CYCLONEDX_FILE"
+            exit 1
+          fi
+
+          if [[ ! -s "$CYCLONEDX_FILE" ]]; then
+            echo "::error::CycloneDX SBOM is empty: $CYCLONEDX_FILE"
+            exit 1
+          fi
+        fi
+
+        if [[ "$GENERATE_SPDX" == "true" ]]; then
+          SPDX_FILE="${GITHUB_WORKSPACE}/${REPORT_DIRECTORY}/container-sbom.spdx.json"
+
+          if [[ ! -f "$SPDX_FILE" ]]; then
+            echo "::error::SPDX SBOM was not generated: $SPDX_FILE"
+            exit 1
+          fi
+
+          if [[ ! -s "$SPDX_FILE" ]]; then
+            echo "::error::SPDX SBOM is empty: $SPDX_FILE"
+            exit 1
+          fi
+        fi
+
+    - name: Expose SBOM Locations
+      id: outputs
+      shell: bash
+      env:
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        GENERATE_CYCLONEDX: ${{ inputs.generate-cyclonedx }}
+        GENERATE_SPDX: ${{ inputs.generate-spdx }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$GENERATE_CYCLONEDX" == "true" ]]; then
+          echo "cyclonedx-file=${GITHUB_WORKSPACE}/${REPORT_DIRECTORY}/container-sbom.cdx.json" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [[ "$GENERATE_SPDX" == "true" ]]; then
+          echo "spdx-file=${GITHUB_WORKSPACE}/${REPORT_DIRECTORY}/container-sbom.spdx.json" >> "$GITHUB_OUTPUT"
+        fi

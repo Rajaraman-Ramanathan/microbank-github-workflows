@@ -40,7 +40,7 @@ inputs:
       Trivy GitHub Action version. Pin to an immutable commit SHA
       before production use.
     required: false
-    default: "v0.36.0"
+    default: "v0.72.0"
 
   additional-args:
     description: >
