@@ -33,7 +33,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-          GITLEAKS_CONFIG: ${{ github.workspace }}/.github/policies/secrets/.gitleaks.toml
+          GITLEAKS_CONFIG: ${{ github.workspace }}/policies/gitleaks/.gitleaks.toml
 
       - name: Verify Gitleaks SARIF Report
         shell: bash
@@ -69,7 +69,7 @@ jobs:
 
       - name: Run Checkmarx SAST
         id: checkmarx
-        uses: ./.github/actions/checkmarx-sast
+        uses: ./actions/checkmarx-sast
         env:
           CX_CLIENT_ID: ${{ secrets.CX_CLIENT_ID }}
           CX_CLIENT_SECRET: ${{ secrets.CX_CLIENT_SECRET }}
@@ -112,7 +112,7 @@ jobs:
 
       - name: Run Snyk SCA
         id: snyk
-        uses: ./.github/actions/snyk-sca
+        uses: ./actions/snyk-sca
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -159,7 +159,7 @@ jobs:
 
       - name: Run Application Verification
         id: verification
-        uses: ./.github/actions/application-verification
+        uses: ./actions/application-verification
         env:
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
