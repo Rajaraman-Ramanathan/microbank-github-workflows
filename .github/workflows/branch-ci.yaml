@@ -66,6 +66,9 @@ jobs:
       runs-on: ubuntu-latest
       needs:
       - build
+      outputs:
+        image-reference: ${{ steps.docker-publish.outputs.image-reference }}
+        image-digest: ${{ steps.docker-publish.outputs.image-digest }}
       steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -170,3 +173,33 @@ jobs:
           registry: ${{ steps.ecr-login.outputs.registry }}
           repository: ${{ env.ECR_REPOSITORY }}
           tag: sha-${{ github.sha }}
+
+      - name: Create Release Metadata
+        shell: bash
+        env:
+          IMAGE_REFERENCE: ${{ steps.docker-publish.outputs.image-reference }}
+          IMAGE_DIGEST: ${{ steps.docker-publish.outputs.image-digest }}
+          IMAGE_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-metadata
+
+          cat > release-metadata/image.json <<EOF
+          {
+            "repository": "${IMAGE_REPOSITORY}",
+            "image_reference": "${IMAGE_REFERENCE}",
+            "image_digest": "${IMAGE_DIGEST}",
+            "git_sha": "${GIT_SHA}"
+          }
+          EOF
+
+          cat release-metadata/image.json
+
+      - name: Upload Release Metadata
+        uses: ./actions/upload-build-artifact
+        with:
+          artifact-name: release-metadata
+          artifact-path: release-metadata/image.json
+          retention-days: "7"

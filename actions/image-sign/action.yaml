@@ -1,0 +1,180 @@
+name: Sign Container Image
+
+description: >
+  Cryptographically signs an immutable container image digest using
+  Cosign and an AWS KMS-backed signing key, then verifies the generated
+  signature before allowing the action to succeed.
+
+author: Microbank Platform Team
+
+inputs:
+  image:
+    description: >
+      Immutable container image reference including digest.
+      Example: registry.example.com/microbank/account-service@sha256:...
+    required: true
+
+  kms-key-uri:
+    description: >
+      AWS KMS key URI used by Cosign for signing and verification.
+      Example: awskms:///arn:aws:kms:ap-south-1:123456789012:key/...
+    required: true
+
+  cosign-version:
+    description: Approved Cosign version.
+    required: false
+    default: "3.0.2"
+
+  additional-args:
+    description: >
+      Additional approved Cosign signing arguments.
+    required: false
+    default: ""
+
+outputs:
+  image:
+    description: Immutable container image reference that was signed.
+    value: ${{ steps.sign.outputs.image }}
+
+  image-digest:
+    description: Digest of the signed container image.
+    value: ${{ steps.sign.outputs.image-digest }}
+
+  verification:
+    description: Signature verification result.
+    value: ${{ steps.verify.outputs.verification }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Image Reference
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$IMAGE" ]]; then
+          echo "::error::Container image reference must not be empty."
+          exit 1
+        fi
+
+        if [[ "$IMAGE" != *@sha256:* ]]; then
+          echo "::error::Image signing requires an immutable SHA256 digest reference."
+          echo "::error::Received: $IMAGE"
+          exit 1
+        fi
+
+        DIGEST="${IMAGE##*@}"
+
+        if [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+          echo "::error::Invalid SHA256 image digest: $DIGEST"
+          exit 1
+        fi
+
+        echo "Validated immutable image reference:"
+        echo "$IMAGE"
+
+    - name: Validate AWS KMS Configuration
+      shell: bash
+      env:
+        KMS_KEY_URI: ${{ inputs.kms-key-uri }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$KMS_KEY_URI" ]]; then
+          echo "::error::AWS KMS key URI must not be empty."
+          exit 1
+        fi
+
+        if [[ "$KMS_KEY_URI" != awskms:///* ]]; then
+          echo "::error::Invalid AWS KMS URI."
+          echo "::error::Expected format: awskms:///..."
+          exit 1
+        fi
+
+        echo "AWS KMS signing key configured."
+
+    - name: Setup Cosign
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: v${{ inputs.cosign-version }}
+
+    - name: Validate Cosign
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        command -v cosign >/dev/null 2>&1 || {
+          echo "::error::Cosign CLI is not available on the runner."
+          exit 1
+        }
+
+        cosign version
+
+    - name: Verify Image Exists
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+
+        if ! cosign tree "$IMAGE" >/dev/null 2>&1; then
+          echo "::error::Unable to access the container registry for image: $IMAGE"
+          echo "::error::Ensure the workflow authenticated to the target registry."
+          exit 1
+        fi
+
+        echo "Container image is accessible."
+
+    - name: Sign Image
+      id: sign
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        KMS_KEY_URI: ${{ inputs.kms-key-uri }}
+        ADDITIONAL_ARGS: ${{ inputs.additional-args }}
+      run: |
+        set -euo pipefail
+
+        COSIGN_ARGS=(
+          sign
+          --yes
+          --key "$KMS_KEY_URI"
+        )
+
+        if [[ -n "$ADDITIONAL_ARGS" ]]; then
+          read -r -a EXTRA_ARGS <<< "$ADDITIONAL_ARGS"
+          COSIGN_ARGS+=("${EXTRA_ARGS[@]}")
+        fi
+
+        cosign "${COSIGN_ARGS[@]}" "$IMAGE"
+
+        IMAGE_DIGEST="${IMAGE##*@}"
+
+        echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+        echo "image-digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+
+        echo "Container image signed successfully."
+        echo "Image: $IMAGE"
+        echo "Digest: $IMAGE_DIGEST"
+
+    - name: Verify Image Signature
+      id: verify
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        KMS_KEY_URI: ${{ inputs.kms-key-uri }}
+      run: |
+        set -euo pipefail
+
+        echo "Verifying Cosign signature for:"
+        echo "$IMAGE"
+
+        cosign verify \
+          --key "$KMS_KEY_URI" \
+          "$IMAGE"
+
+        echo "verification=passed" >> "$GITHUB_OUTPUT"
+
+        echo "Container image signature verified successfully."

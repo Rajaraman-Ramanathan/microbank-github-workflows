@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows:
+      - Branch CI
+    types:
+      - completed
+    branches:
+      - development
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.repository.full_name || github.repository }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: microbank/${{ github.event.repository.name }}
+
+jobs:
+  release-context:
+    name: Resolve Release Context
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Release Trigger
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            if [[ "$WORKFLOW_NAME" != "Branch CI" ]]; then
+              echo "::error::Release was not triggered by Branch CI."
+              exit 1
+            fi
+
+            if [[ "$WORKFLOW_CONCLUSION" != "success" ]]; then
+              echo "::error::Branch CI did not complete successfully."
+              exit 1
+            fi
+
+            if [[ "$WORKFLOW_BRANCH" != "development" ]]; then
+              echo "::error::Branch CI must originate from the development branch."
+              echo "::error::Branch: $WORKFLOW_BRANCH"
+              exit 1
+            fi
+          fi
+
+          echo "Release trigger validation passed."
+
+      - name: Display Release Context
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          echo "Release event: $EVENT_NAME"
+          echo "Repository: $REPOSITORY"
+
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            echo "Branch CI run ID: $RUN_ID"
+            echo "Source branch: $HEAD_BRANCH"
+            echo "Source commit: $HEAD_SHA"
+          fi
