@@ -1,0 +1,177 @@
+name: Application Testing
+
+description: >
+  Performs a lightweight HTTP application health and smoke test with
+  configurable retries and timeout.
+
+author: Microbank Platform Team
+
+inputs:
+  base-url:
+    description: Base URL of the deployed application.
+    required: true
+
+  health-path:
+    description: HTTP path used for the health check.
+    required: false
+    default: "/actuator/health"
+
+  expected-status:
+    description: Expected HTTP status code.
+    required: false
+    default: "200"
+
+  attempts:
+    description: Maximum number of health-check attempts.
+    required: false
+    default: "12"
+
+  retry-delay:
+    description: Delay in seconds between failed attempts.
+    required: false
+    default: "10"
+
+  connect-timeout:
+    description: Maximum connection time in seconds.
+    required: false
+    default: "5"
+
+  request-timeout:
+    description: Maximum total request time in seconds.
+    required: false
+    default: "15"
+
+outputs:
+  status-code:
+    description: HTTP status code returned by the successful health check.
+    value: ${{ steps.health-check.outputs.status-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Inputs
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.base-url }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+        EXPECTED_STATUS: ${{ inputs.expected-status }}
+        ATTEMPTS: ${{ inputs.attempts }}
+        RETRY_DELAY: ${{ inputs.retry-delay }}
+        CONNECT_TIMEOUT: ${{ inputs.connect-timeout }}
+        REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$BASE_URL" ]]; then
+          echo "::error::Application base URL must not be empty."
+          exit 1
+        fi
+
+        if [[ ! "$BASE_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+          echo "::error::Application base URL must use HTTP or HTTPS."
+          exit 1
+        fi
+
+        if [[ -z "$HEALTH_PATH" || "$HEALTH_PATH" != /* ]]; then
+          echo "::error::Health path must begin with '/'."
+          exit 1
+        fi
+
+        if [[ "$HEALTH_PATH" == *" "* ]]; then
+          echo "::error::Health path must not contain spaces."
+          exit 1
+        fi
+
+        if [[ ! "$EXPECTED_STATUS" =~ ^[1-5][0-9][0-9]$ ]]; then
+          echo "::error::Invalid expected HTTP status: $EXPECTED_STATUS"
+          exit 1
+        fi
+
+        if (( ATTEMPTS < 1 )); then
+          echo "::error::Attempts must be at least 1."
+          exit 1
+        fi
+
+        if (( RETRY_DELAY < 0 )); then
+          echo "::error::Retry delay cannot be negative."
+          exit 1
+        fi
+
+        if (( CONNECT_TIMEOUT < 1 )); then
+          echo "::error::Connect timeout must be at least 1 second."
+          exit 1
+        fi
+
+        if (( REQUEST_TIMEOUT < 1 )); then
+          echo "::error::Request timeout must be at least 1 second."
+          exit 1
+        fi
+
+        if ! command -v curl >/dev/null 2>&1; then
+          echo "::error::curl is required on the runner."
+          exit 1
+        fi
+
+        curl --version | head -n 1
+
+    - name: Application Health Check
+      id: health-check
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.base-url }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+        EXPECTED_STATUS: ${{ inputs.expected-status }}
+        ATTEMPTS: ${{ inputs.attempts }}
+        RETRY_DELAY: ${{ inputs.retry-delay }}
+        CONNECT_TIMEOUT: ${{ inputs.connect-timeout }}
+        REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
+      run: |
+        set -euo pipefail
+
+        ENDPOINT="${BASE_URL%/}/${HEALTH_PATH#/}"
+
+        echo "Application health endpoint: $ENDPOINT"
+        echo "Expected HTTP status: $EXPECTED_STATUS"
+        echo "Maximum attempts: $ATTEMPTS"
+
+        LAST_STATUS="000"
+
+        for (( attempt=1; attempt<=ATTEMPTS; attempt++ )); do
+          echo "Health check attempt ${attempt}/${ATTEMPTS}..."
+
+          HTTP_STATUS="$(
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --connect-timeout "$CONNECT_TIMEOUT" \
+              --max-time "$REQUEST_TIMEOUT" \
+              "$ENDPOINT" \
+              || true
+          )"
+
+          LAST_STATUS="$HTTP_STATUS"
+
+          if [[ "$HTTP_STATUS" == "$EXPECTED_STATUS" ]]; then
+            echo "Application health check passed."
+            echo "HTTP status: $HTTP_STATUS"
+
+            echo "status-code=$HTTP_STATUS" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Health check returned HTTP status: $HTTP_STATUS"
+
+          if (( attempt < ATTEMPTS )); then
+            echo "Retrying in ${RETRY_DELAY} seconds..."
+            sleep "$RETRY_DELAY"
+          fi
+        done
+
+        echo "::error::Application health check failed."
+        echo "::error::Endpoint: $ENDPOINT"
+        echo "::error::Expected HTTP status: $EXPECTED_STATUS"
+        echo "::error::Last HTTP status: $LAST_STATUS"
+
+        exit 1

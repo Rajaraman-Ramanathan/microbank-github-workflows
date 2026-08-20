@@ -1,127 +1,30 @@
 name: PR Validation
 
 on:
-  workflow_call:
-    inputs:
-
-      # ----------------------------------------------------------------
-      # Pull request context
-      # ----------------------------------------------------------------
-
-      pull-request-number:
-        description: Pull request number being validated.
-        required: true
-        type: number
-
-      # ----------------------------------------------------------------
-      # Application configuration
-      # ----------------------------------------------------------------
-
-      source-directory:
-        description: >
-          Application source directory to validate.
-          Defaults to the repository root.
-        required: false
-        default: "."
-        type: string
-
-      # ----------------------------------------------------------------
-      # Checkmarx configuration
-      # ----------------------------------------------------------------
-
-      cx-base-uri:
-        description: Checkmarx base URI.
-        required: true
-        type: string
-
-      cx-tenant:
-        description: Checkmarx tenant.
-        required: true
-        type: string
-
-      # ----------------------------------------------------------------
-      # Snyk configuration
-      # ----------------------------------------------------------------
-
-      snyk-organization:
-        description: Snyk organization used for the application.
-        required: true
-        type: string
-
-      # ----------------------------------------------------------------
-      # SonarQube configuration
-      # ----------------------------------------------------------------
-
-      sonar-host-url:
-        description: SonarQube server URL.
-        required: true
-        type: string
-
-      sonar-project-key:
-        description: SonarQube project key for the application.
-        required: true
-        type: string
-
-    secrets:
-
-      # ----------------------------------------------------------------
-      # Gitleaks
-      # ----------------------------------------------------------------
-
-      gitleaks-license:
-        description: Gitleaks license.
-        required: true
-
-      # ----------------------------------------------------------------
-      # Checkmarx
-      # ----------------------------------------------------------------
-
-      cx-client-id:
-        description: Checkmarx client ID.
-        required: true
-
-      cx-client-secret:
-        description: Checkmarx client secret.
-        required: true
-
-      # ----------------------------------------------------------------
-      # Snyk
-      # ----------------------------------------------------------------
-
-      snyk-token:
-        description: Snyk authentication token.
-        required: true
-
-      # ----------------------------------------------------------------
-      # SonarQube
-      # ----------------------------------------------------------------
-
-      sonar-token:
-        description: SonarQube authentication token.
-        required: true
-
+  pull_request:
+    branches:
+      - development
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
 
 permissions:
   contents: read
+  pull-requests: read
   security-events: write
 
-
 concurrency:
-  group: pr-validation-${{ inputs.pull-request-number }}
+  group: pr-validation-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
-
 jobs:
-
-  # ==================================================================
-  # GITLEAKS
-  # ==================================================================
-
-  gitleaks:
-    name: Gitleaks Scan
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Application Repository
+    gitleaks:
+      name: Gitleaks Scan
+      runs-on: ubuntu-latest
+      steps:
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Run Gitleaks
@@ -129,7 +32,8 @@ jobs:
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          GITLEAKS_LICENSE: ${{ secrets.gitleaks-license }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_CONFIG: ${{ github.workspace }}/policies/gitleaks/.gitleaks.toml
 
       - name: Verify Gitleaks SARIF Report
         shell: bash
@@ -155,30 +59,24 @@ jobs:
           sarif_file: ${{ github.workspace }}/results.sarif
           category: gitleaks
 
-
-  # ==================================================================
-  # CHECKMARX SAST
-  # ==================================================================
-
-  checkmarx-sast:
-    name: Checkmarx SAST
-    runs-on: ubuntu-latest
-    needs:
-      - gitleaks
-    steps:
-      - name: Checkout Application Repository
+    checkmarx-sast:
+      name: Checkmarx SAST
+      runs-on: ubuntu-latest
+      needs: gitleaks
+      steps:
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Run Checkmarx SAST
         id: checkmarx
         uses: ./actions/checkmarx-sast
         env:
-          CX_CLIENT_ID: ${{ secrets.cx-client-id }}
-          CX_CLIENT_SECRET: ${{ secrets.cx-client-secret }}
+          CX_CLIENT_ID: ${{ secrets.CX_CLIENT_ID }}
+          CX_CLIENT_SECRET: ${{ secrets.CX_CLIENT_SECRET }}
         with:
-          base-uri: ${{ inputs.cx-base-uri }}
-          tenant: ${{ inputs.cx-tenant }}
-          source-directory: ${{ inputs.source-directory }}
+          base-uri: ${{ vars.CX_BASE_URI }}
+          tenant: ${{ vars.CX_TENANT }}
+          source-directory: "."
           sast-threshold: "sast-critical=1;sast-high=1"
           incremental: "false"
           generate-sarif: "true"
@@ -191,18 +89,12 @@ jobs:
           sarif_file: ${{ steps.checkmarx.outputs.sarif-file }}
           category: checkmarx-sast
 
-
-  # ==================================================================
-  # SNYK SCA
-  # ==================================================================
-
-  snyk-sca:
-    name: Snyk SCA
-    runs-on: ubuntu-latest
-    needs:
-      - gitleaks
-    steps:
-      - name: Checkout Application Repository
+    snyk-sca:
+      name: Snyk SCA
+      runs-on: ubuntu-latest
+      needs: gitleaks
+      steps:
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Java
@@ -222,10 +114,10 @@ jobs:
         id: snyk
         uses: ./actions/snyk-sca
         env:
-          SNYK_TOKEN: ${{ secrets.snyk-token }}
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
-          working-directory: ${{ inputs.source-directory }}
-          organization: ${{ inputs.snyk-organization }}
+          working-directory: "."
+          organization: ${{ vars.SNYK_ORGANIZATION }}
           severity-threshold: "high"
           generate-sarif: "true"
           generate-json: "true"
@@ -244,23 +136,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: snyk-sca-report
-          path: ${{ inputs.source-directory }}/.github/reports/snyk.json
+          path: .github/reports/snyk.json
           if-no-files-found: error
           retention-days: 30
 
-
-  # ==================================================================
-  # APPLICATION VERIFICATION
-  # ==================================================================
-
-  application-verification:
-    name: Application Verification
-    runs-on: ubuntu-latest
-    needs:
+    application-verification:
+      name: Application Verification
+      runs-on: ubuntu-latest
+      needs:
       - checkmarx-sast
       - snyk-sca
-    steps:
-      - name: Checkout Application Repository
+      steps:
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Java
@@ -274,11 +161,11 @@ jobs:
         id: verification
         uses: ./actions/application-verification
         env:
-          SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
-          SONAR_TOKEN: ${{ secrets.sonar-token }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
-          working-directory: ${{ inputs.source-directory }}
-          sonar-project-key: ${{ inputs.sonar-project-key }}
+          working-directory: "."
+          sonar-project-key: ${{ vars.SONAR_PROJECT_KEY }}
           maven-goals: "verify"
 
       - name: Upload Unit Test Results
@@ -317,17 +204,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-
-  # ==================================================================
-  # SONARQUBE QUALITY GATE
-  # ==================================================================
-
-  sonar-quality-gate:
-    name: SonarQube Quality Gate
-    runs-on: ubuntu-latest
-    needs:
-      - application-verification
-    steps:
+    sonar-quality-gate:
+      name: SonarQube Quality Gate
+      runs-on: ubuntu-latest
+      needs: application-verification
+      steps:
       - name: Download SonarQube Task Report
         uses: actions/download-artifact@v4
         with:
@@ -358,25 +239,20 @@ jobs:
           scanMetadataReportFile: sonar-task-report/report-task.txt
           pollingTimeoutSec: 600
         env:
-          SONAR_TOKEN: ${{ secrets.sonar-token }}
-          SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
-
-  # ==================================================================
-  # PR VALIDATION SUMMARY
-  # ==================================================================
-
-  pr-validation-summary:
-    name: PR Validation Summary
-    runs-on: ubuntu-latest
-    if: always()
-    needs:
+    pr-validation-summary:
+      name: PR Validation Summary
+      runs-on: ubuntu-latest
+      if: always()
+      needs:
       - gitleaks
       - checkmarx-sast
       - snyk-sca
       - application-verification
       - sonar-quality-gate
-    steps:
+      steps:
       - name: Generate PR Validation Summary
         shell: bash
         env:
@@ -455,3 +331,4 @@ jobs:
           echo "## Overall Result" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           echo "✅ **PR validation passed.**" >> "$GITHUB_STEP_SUMMARY"
+    

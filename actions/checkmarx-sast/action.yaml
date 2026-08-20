@@ -10,17 +10,13 @@ author: Microbank Platform Team
 inputs:
   project-name:
     description: >
-      Checkmarx One project name. If omitted, the GitHub repository
-      name is used.
-    required: false
-    default: ""
+      Checkmarx One project name.
+    required: true
 
   branch:
     description: >
-      Checkmarx One project branch. If omitted, the pull request head
-      branch or current GitHub reference is used.
-    required: false
-    default: ""
+      Checkmarx One project branch.
+    required: true
 
   base-uri:
     description: Checkmarx One base URI.
@@ -53,7 +49,9 @@ inputs:
     default: "true"
 
   report-directory:
-    description: Directory where the SARIF report is generated.
+    description: >
+      Directory relative to the GitHub workspace where the SARIF report
+      is generated.
     required: false
     default: ".github/reports"
 
@@ -75,7 +73,9 @@ outputs:
 
 runs:
   using: composite
+
   steps:
+
     - name: Validate Checkmarx Configuration
       shell: bash
       env:
@@ -122,12 +122,11 @@ runs:
       if: inputs.generate-sarif == 'true'
       shell: bash
       env:
-        SOURCE_DIRECTORY: ${{ inputs.source-directory }}
         REPORT_DIRECTORY: ${{ inputs.report-directory }}
       run: |
         set -euo pipefail
 
-        REPORT_PATH="${SOURCE_DIRECTORY}/${REPORT_DIRECTORY}"
+        REPORT_PATH="${GITHUB_WORKSPACE}/${REPORT_DIRECTORY}"
 
         mkdir -p "$REPORT_PATH"
 
@@ -135,32 +134,18 @@ runs:
       id: context
       shell: bash
       env:
-        PROJECT_NAME_INPUT: ${{ inputs.project-name }}
-        BRANCH_INPUT: ${{ inputs.branch }}
+        PROJECT_NAME: ${{ inputs.project-name }}
+        BRANCH: ${{ inputs.branch }}
       run: |
         set -euo pipefail
 
-        if [[ -n "$PROJECT_NAME_INPUT" ]]; then
-          PROJECT_NAME="$PROJECT_NAME_INPUT"
-        else
-          PROJECT_NAME="${GITHUB_REPOSITORY}"
-        fi
-
-        if [[ -n "$BRANCH_INPUT" ]]; then
-          BRANCH="$BRANCH_INPUT"
-        elif [[ -n "${GITHUB_HEAD_REF:-}" ]]; then
-          BRANCH="${GITHUB_HEAD_REF}"
-        else
-          BRANCH="${GITHUB_REF_NAME}"
-        fi
-
         if [[ -z "$PROJECT_NAME" ]]; then
-          echo "::error::Checkmarx project name could not be resolved."
+          echo "::error::Checkmarx project name must be provided."
           exit 1
         fi
 
         if [[ -z "$BRANCH" ]]; then
-          echo "::error::Checkmarx branch could not be resolved."
+          echo "::error::Checkmarx branch must be provided."
           exit 1
         fi
 
@@ -188,23 +173,23 @@ runs:
           --threshold "${{ inputs.sast-threshold }}"
           ${{ inputs.incremental == 'true' && '--sast-incremental' || '' }}
           ${{ inputs.generate-sarif == 'true'
-              && format('--report-format sarif --output-path {0}/{1}',
-                        inputs.source-directory,
-                        inputs.report-directory)
+              && format(
+                   '--report-format sarif --output-path {0}/{1}',
+                   github.workspace,
+                   inputs.report-directory
+                 )
               || '' }}
           ${{ inputs.additional-scan-params }}
 
     - name: Verify SARIF Report
       if: inputs.generate-sarif == 'true'
       shell: bash
-      working-directory: ${{ inputs.source-directory }}
       env:
-        SOURCE_DIRECTORY: ${{ inputs.source-directory }}
         REPORT_DIRECTORY: ${{ inputs.report-directory }}
       run: |
         set -euo pipefail
 
-        SARIF_FILE="${SOURCE_DIRECTORY}/${REPORT_DIRECTORY}/cx_result.sarif"
+        SARIF_FILE="${GITHUB_WORKSPACE}/${REPORT_DIRECTORY}/cx_result.sarif"
 
         if [[ ! -f "$SARIF_FILE" ]]; then
           echo "::error::Checkmarx SARIF report was not generated: $SARIF_FILE"
@@ -220,13 +205,11 @@ runs:
       if: inputs.generate-sarif == 'true'
       id: report
       shell: bash
-      working-directory: ${{ inputs.source-directory }}
       env:
-        SOURCE_DIRECTORY: ${{ inputs.source-directory }}
         REPORT_DIRECTORY: ${{ inputs.report-directory }}
       run: |
         set -euo pipefail
 
-        SARIF_FILE="${SOURCE_DIRECTORY}/${REPORT_DIRECTORY}/cx_result.sarif"
+        SARIF_FILE="${GITHUB_WORKSPACE}/${REPORT_DIRECTORY}/cx_result.sarif"
 
-        echo "sarif-file=${GITHUB_WORKSPACE}/${SARIF_FILE}" >> "$GITHUB_OUTPUT"
+        echo "sarif-file=$SARIF_FILE" >> "$GITHUB_OUTPUT"

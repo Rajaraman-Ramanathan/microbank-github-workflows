@@ -25,7 +25,9 @@ inputs:
     default: "high"
 
   report-directory:
-    description: Directory where Snyk reports are generated.
+    description: >
+      Directory relative to the Maven project root where Snyk
+      reports are generated.
     required: false
     default: ".github/reports"
 
@@ -67,7 +69,9 @@ outputs:
 
 runs:
   using: composite
+
   steps:
+
     - name: Validate Maven Project
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -145,9 +149,7 @@ runs:
         )
 
         if [[ "$MAVEN_AGGREGATE_PROJECT" == "true" ]]; then
-          SNYK_ARGS+=(
-            --maven-aggregate-project
-          )
+          SNYK_ARGS+=(--maven-aggregate-project)
         fi
 
         if [[ "$GENERATE_SARIF" == "true" ]]; then
@@ -168,8 +170,9 @@ runs:
         fi
 
         snyk "${SNYK_ARGS[@]}"
-
         EXIT_CODE=$?
+
+        set -e
 
         echo "exit-code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
@@ -237,13 +240,12 @@ runs:
     - name: Enforce Snyk Security Gate
       if: always()
       shell: bash
+      env:
+        SNYK_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
       run: |
         set -euo pipefail
 
-        EXIT_CODE="${{ steps.scan.outputs.exit-code }}"
-
-        case "$EXIT_CODE" in
-
+        case "$SNYK_EXIT_CODE" in
           0)
             echo "Snyk dependency scan passed."
             ;;
@@ -264,8 +266,7 @@ runs:
             ;;
 
           *)
-            echo "::error::Snyk returned unexpected exit code: $EXIT_CODE"
-            exit "$EXIT_CODE"
+            echo "::error::Snyk returned unexpected exit code: $SNYK_EXIT_CODE"
+            exit "$SNYK_EXIT_CODE"
             ;;
-
         esac

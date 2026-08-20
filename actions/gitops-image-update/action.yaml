@@ -1,0 +1,275 @@
+name: Update GitOps Image
+
+description: >
+  Updates an immutable container image digest in a GitOps environment
+  values file, commits the change, and pushes it to the target branch.
+
+author: Microbank Platform Team
+
+inputs:
+  gitops-repository:
+    description: GitHub repository containing the GitOps configuration.
+    required: true
+
+  gitops-branch:
+    description: Git branch to update.
+    required: true
+
+  environment:
+    description: Deployment environment.
+    required: true
+
+  service-directory:
+    description: >
+      Service directory under the environment directory.
+      Example: account for environments/dev/account/values.yaml.
+    required: true
+
+  image-digest:
+    description: Immutable container image digest.
+    required: true
+
+  source-sha:
+    description: Source Git commit SHA associated with the image.
+    required: true
+
+  token:
+    description: GitHub token or GitHub App token with permission to
+      read and push to the GitOps repository.
+    required: true
+
+  values-file:
+    description: >
+      Optional values file name within the service directory.
+    required: false
+    default: "values.yaml"
+
+outputs:
+  changed:
+    description: Whether the GitOps repository was changed.
+    value: ${{ steps.update.outputs.changed }}
+
+  commit-sha:
+    description: Git commit SHA containing the deployment change.
+    value: ${{ steps.update.outputs.commit-sha }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Validate Inputs
+      shell: bash
+      env:
+        GITOPS_REPOSITORY: ${{ inputs.gitops-repository }}
+        GITOPS_BRANCH: ${{ inputs.gitops-branch }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        SERVICE_DIRECTORY: ${{ inputs.service-directory }}
+        IMAGE_DIGEST: ${{ inputs.image-digest }}
+        SOURCE_SHA: ${{ inputs.source-sha }}
+        VALUES_FILE: ${{ inputs.values-file }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$GITOPS_REPOSITORY" ]]; then
+          echo "::error::GitOps repository must not be empty."
+          exit 1
+        fi
+
+        if [[ ! "$GITOPS_REPOSITORY" =~ ^[^/]+/[^/]+$ ]]; then
+          echo "::error::GitOps repository must use owner/repository format."
+          exit 1
+        fi
+
+        if [[ -z "$GITOPS_BRANCH" ]]; then
+          echo "::error::GitOps branch must not be empty."
+          exit 1
+        fi
+
+        if [[ ! "$GITOPS_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+          echo "::error::Invalid GitOps branch name."
+          exit 1
+        fi
+
+        if [[ ! "$ENVIRONMENT" =~ ^(dev|stage|prod)$ ]]; then
+          echo "::error::Unsupported deployment environment: $ENVIRONMENT"
+          echo "::error::Expected one of: dev, stage, prod"
+          exit 1
+        fi
+
+        if [[ -z "$SERVICE_DIRECTORY" ]]; then
+          echo "::error::Service directory must not be empty."
+          exit 1
+        fi
+
+        if [[ "$SERVICE_DIRECTORY" == /* ||
+              "$SERVICE_DIRECTORY" == *".."* ||
+              "$SERVICE_DIRECTORY" == *"//"* ]]; then
+          echo "::error::Invalid service directory."
+          exit 1
+        fi
+
+        if [[ -z "$VALUES_FILE" ||
+              "$VALUES_FILE" == */* ||
+              "$VALUES_FILE" == *".."* ]]; then
+          echo "::error::Invalid values file name."
+          exit 1
+        fi
+
+        if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+          echo "::error::Invalid image digest: $IMAGE_DIGEST"
+          exit 1
+        fi
+
+        if [[ ! "$SOURCE_SHA" =~ ^[a-f0-9]{40}$|^[a-f0-9]{64}$ ]]; then
+          echo "::error::Invalid source Git SHA."
+          exit 1
+        fi
+
+    - name: Checkout GitOps Repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.gitops-repository }}
+        ref: ${{ inputs.gitops-branch }}
+        token: ${{ inputs.token }}
+        path: gitops
+        fetch-depth: 1
+    
+    - name: Install yq
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        YQ_VERSION="v4.53.3"
+        YQ_URL="https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+
+        curl \
+          --fail \
+          --silent \
+          --show-error \
+          --location \
+          "$YQ_URL" \
+          --output "$RUNNER_TEMP/yq"
+
+        chmod +x "$RUNNER_TEMP/yq"
+
+        echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+        yq --version
+
+    - name: Update GitOps Image Digest
+      id: update
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        SERVICE_DIRECTORY: ${{ inputs.service-directory }}
+        VALUES_FILE: ${{ inputs.values-file }}
+        IMAGE_DIGEST: ${{ inputs.image-digest }}
+        SOURCE_SHA: ${{ inputs.source-sha }}
+      run: |
+        set -euo pipefail
+
+        VALUES_PATH="gitops/environments/${ENVIRONMENT}/${SERVICE_DIRECTORY}/${VALUES_FILE}"
+
+        if [[ ! -f "$VALUES_PATH" ]]; then
+          echo "::error::GitOps values file was not found."
+          echo "::error::Expected: $VALUES_PATH"
+          exit 1
+        fi
+
+        echo "GitOps values file: $VALUES_PATH"
+
+        CURRENT_DIGEST="$(
+          yq -r '.image.digest // ""' "$VALUES_PATH"
+        )"
+
+        if [[ -n "$CURRENT_DIGEST" &&
+              ! "$CURRENT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+          echo "::error::Existing image.digest is invalid."
+          echo "::error::Current value: $CURRENT_DIGEST"
+          exit 1
+        fi
+
+        if [[ "$CURRENT_DIGEST" == "$IMAGE_DIGEST" ]]; then
+          echo "Requested image digest is already deployed in GitOps."
+          echo "Digest: $IMAGE_DIGEST"
+
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          echo "commit-sha=$(git -C gitops rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          exit 0
+        fi
+
+        IMAGE_REPOSITORY="$(
+          yq -r '.image.repository // ""' "$VALUES_PATH"
+        )"
+
+        if [[ -z "$IMAGE_REPOSITORY" ]]; then
+          echo "::error::image.repository is missing from GitOps values."
+          exit 1
+        fi
+
+        yq -i \
+          '.image.digest = strenv(IMAGE_DIGEST)' \
+          "$VALUES_PATH"
+
+        UPDATED_DIGEST="$(
+          yq -r '.image.digest // ""' "$VALUES_PATH"
+        )"
+
+        if [[ "$UPDATED_DIGEST" != "$IMAGE_DIGEST" ]]; then
+          echo "::error::GitOps image digest update could not be verified."
+          echo "::error::Expected: $IMAGE_DIGEST"
+          echo "::error::Received: $UPDATED_DIGEST"
+          exit 1
+        fi
+
+        echo "Updated GitOps image configuration:"
+        yq '.image' "$VALUES_PATH"
+
+        git -C gitops diff --check
+
+        git -C gitops diff -- "$VALUES_PATH"
+
+        echo "GitOps image digest updated successfully."
+
+        echo "changed=true" >> "$GITHUB_OUTPUT"
+
+    - name: Commit GitOps Change
+      if: steps.update.outputs.changed == 'true'
+      shell: bash
+      env:
+        SOURCE_SHA: ${{ inputs.source-sha }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        SERVICE_DIRECTORY: ${{ inputs.service-directory }}
+      run: |
+        set -euo pipefail
+
+        git -C gitops config user.name "Microbank Release Bot"
+        git -C gitops config user.email "microbank-release-bot@users.noreply.github.com"
+
+        git -C gitops add \
+          "environments/${ENVIRONMENT}/${SERVICE_DIRECTORY}"
+
+        if git -C gitops diff --cached --quiet; then
+          echo "::error::Expected GitOps changes were not staged."
+          exit 1
+        fi
+
+        git -C gitops commit \
+          -m "deploy(${ENVIRONMENT}): ${SERVICE_DIRECTORY} ${SOURCE_SHA:0:12}"
+
+        COMMIT_SHA="$(git -C gitops rev-parse HEAD)"
+
+        echo "GitOps commit created: $COMMIT_SHA"
+
+        echo "commit-sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+
+    - name: Push GitOps Change
+      if: steps.update.outputs.changed == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        git -C gitops push origin HEAD:${{ inputs.gitops-branch }}
+
+        echo "GitOps change pushed successfully."
