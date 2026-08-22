@@ -113,6 +113,18 @@ runs:
 
         docker tag "$IMAGE" "$TARGET_IMAGE"
 
+    - name: Validate AWS CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v aws >/dev/null 2>&1; then
+          echo "::error::AWS CLI is not available on the runner."
+          exit 1
+        fi
+
+        aws --version
+
     - name: Publish Image
       id: publish
       shell: bash
@@ -127,22 +139,25 @@ runs:
 
         echo "Publishing container image: $TARGET_IMAGE"
 
-        PUSH_OUTPUT="$(docker push "$TARGET_IMAGE" 2>&1)" || {
-          echo "$PUSH_OUTPUT"
-          echo "::error::Failed to publish container image to ECR: $TARGET_IMAGE"
-          exit 1
-        }
-
-        echo "$PUSH_OUTPUT"
+        docker push "$TARGET_IMAGE"
 
         IMAGE_DIGEST="$(
-          printf '%s\n' "$PUSH_OUTPUT" |
-          sed -n 's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' |
-          tail -n 1
+          aws ecr describe-images \
+            --repository-name "$REPOSITORY" \
+            --image-ids imageTag="$TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text
         )"
 
-        if [[ -z "$IMAGE_DIGEST" ]]; then
-          echo "::error::ECR image digest was not returned by docker push."
+        if [[ -z "$IMAGE_DIGEST" || "$IMAGE_DIGEST" == "None" ]]; then
+          echo "::error::ECR image digest could not be resolved."
+          echo "::error::Repository: $REPOSITORY"
+          echo "::error::Tag: $TAG"
+          exit 1
+        fi
+
+        if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+          echo "::error::Invalid ECR image digest: $IMAGE_DIGEST"
           exit 1
         fi
 

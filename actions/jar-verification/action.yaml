@@ -31,9 +31,9 @@ inputs:
     default: "true"
 
 outputs:
-  jar-file:
+  jar-path:
     description: Absolute path to the verified JAR.
-    value: ${{ steps.verify.outputs.jar-file }}
+    value: ${{ steps.verify.outputs.jar-path }}
 
   sha256:
     description: SHA-256 checksum of the verified JAR.
@@ -52,6 +52,11 @@ runs:
         JAR_PATH: ${{ inputs.jar-path }}
       run: |
         set -euo pipefail
+
+        if [[ -z "$JAR_PATH" ]]; then
+          echo "::error::JAR path must not be empty."
+          exit 1
+        fi
 
         if [[ ! -f "$JAR_PATH" ]]; then
           echo "::error::JAR file was not found: $JAR_PATH"
@@ -95,46 +100,33 @@ runs:
           exit 1
         fi
 
-    - name: Validate JAR Manifest
+    - name: Validate JAR Structure
       shell: bash
       env:
         JAR_PATH: ${{ inputs.jar-path }}
+        VERIFY_SPRING_BOOT: ${{ inputs.verify-spring-boot }}
       run: |
         set -euo pipefail
 
-        if ! jar xf "$JAR_PATH" META-INF/MANIFEST.MF 2>/dev/null; then
-          echo "::error::JAR manifest could not be extracted: $JAR_PATH"
+        JAR_CONTENTS="$(jar tf "$JAR_PATH")"
+
+        if ! grep -q '^META-INF/MANIFEST.MF$' <<< "$JAR_CONTENTS"; then
+          echo "::error::JAR does not contain META-INF/MANIFEST.MF: $JAR_PATH"
           exit 1
         fi
 
-        if [[ ! -s META-INF/MANIFEST.MF ]]; then
-          echo "::error::JAR manifest is missing or empty: $JAR_PATH"
-          exit 1
-        fi
+        if [[ "$VERIFY_SPRING_BOOT" == "true" ]]; then
 
-        rm -rf META-INF
+          if ! grep -q '^BOOT-INF/classes/' <<< "$JAR_CONTENTS"; then
+            echo "::error::Spring Boot executable JAR does not contain BOOT-INF/classes/: $JAR_PATH"
+            exit 1
+          fi
 
-    - name: Validate Spring Boot Executable Structure
-      if: inputs.verify-spring-boot == 'true'
-      shell: bash
-      env:
-        JAR_PATH: ${{ inputs.jar-path }}
-      run: |
-        set -euo pipefail
+          if ! grep -q '^BOOT-INF/lib/' <<< "$JAR_CONTENTS"; then
+            echo "::error::Spring Boot executable JAR does not contain BOOT-INF/lib/: $JAR_PATH"
+            exit 1
+          fi
 
-        if ! jar tf "$JAR_PATH" | grep -q '^BOOT-INF/classes/'; then
-          echo "::error::Spring Boot executable JAR does not contain BOOT-INF/classes/: $JAR_PATH"
-          exit 1
-        fi
-
-        if ! jar tf "$JAR_PATH" | grep -q '^BOOT-INF/lib/'; then
-          echo "::error::Spring Boot executable JAR does not contain BOOT-INF/lib/: $JAR_PATH"
-          exit 1
-        fi
-
-        if ! jar tf "$JAR_PATH" | grep -q '^META-INF/MANIFEST.MF$'; then
-          echo "::error::Spring Boot executable JAR does not contain META-INF/MANIFEST.MF: $JAR_PATH"
-          exit 1
         fi
 
     - name: Calculate SHA-256
@@ -157,23 +149,31 @@ runs:
         fi
 
         CHECKSUM_FILE="$(realpath -m "$CHECKSUM_FILE")"
-
         CHECKSUM_DIRECTORY="$(dirname "$CHECKSUM_FILE")"
 
-        if [[ ! -d "$CHECKSUM_DIRECTORY" ]]; then
-          mkdir -p "$CHECKSUM_DIRECTORY"
-        fi
+        mkdir -p "$CHECKSUM_DIRECTORY"
 
-        printf '%s  %s\n' "$SHA256" "$(basename "$JAR_FILE")" > "$CHECKSUM_FILE"
+        printf '%s  %s\n' \
+          "$SHA256" \
+          "$(basename "$JAR_FILE")" \
+          > "$CHECKSUM_FILE"
 
         if [[ -n "$EXPECTED_SHA256" ]]; then
-          NORMALIZED_EXPECTED="$(printf '%s' "$EXPECTED_SHA256" | tr '[:upper:]' '[:lower:]')"
-          NORMALIZED_ACTUAL="$(printf '%s' "$SHA256" | tr '[:upper:]' '[:lower:]')"
 
-          if [[ "$NORMALIZED_ACTUAL" != "$NORMALIZED_EXPECTED" ]]; then
+          NORMALIZED_EXPECTED="$(
+            printf '%s' "$EXPECTED_SHA256" |
+            tr '[:upper:]' '[:lower:]'
+          )"
+
+          if [[ ! "$NORMALIZED_EXPECTED" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "::error::Expected SHA-256 checksum must contain exactly 64 hexadecimal characters."
+            exit 1
+          fi
+
+          if [[ "$SHA256" != "$NORMALIZED_EXPECTED" ]]; then
             echo "::error::JAR SHA-256 checksum does not match the expected checksum."
             echo "::error::Expected: $NORMALIZED_EXPECTED"
-            echo "::error::Actual:   $NORMALIZED_ACTUAL"
+            echo "::error::Actual:   $SHA256"
             exit 1
           fi
 
@@ -184,6 +184,6 @@ runs:
         echo "SHA-256: $SHA256"
         echo "Checksum file: $CHECKSUM_FILE"
 
-        echo "jar-file=$JAR_FILE" >> "$GITHUB_OUTPUT"
+        echo "jar-path=$JAR_FILE" >> "$GITHUB_OUTPUT"
         echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
         echo "checksum-file=$CHECKSUM_FILE" >> "$GITHUB_OUTPUT"

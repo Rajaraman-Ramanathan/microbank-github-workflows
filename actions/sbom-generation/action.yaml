@@ -27,9 +27,7 @@ inputs:
     default: "false"
 
   trivy-version:
-    description: >
-      Approved Trivy CLI version. Pin the underlying action to an
-      immutable commit SHA for production use.
+    description: Approved Trivy CLI version to install and use.
     required: false
     default: "v0.72.0"
 
@@ -45,6 +43,35 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Validate Inputs
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        GENERATE_CYCLONEDX: ${{ inputs.generate-cyclonedx }}
+        GENERATE_SPDX: ${{ inputs.generate-spdx }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$IMAGE" ]]; then
+          echo "::error::Container image reference must not be empty."
+          exit 1
+        fi
+
+        if [[ "$GENERATE_CYCLONEDX" != "true" && "$GENERATE_CYCLONEDX" != "false" ]]; then
+          echo "::error::generate-cyclonedx must be either 'true' or 'false'."
+          exit 1
+        fi
+
+        if [[ "$GENERATE_SPDX" != "true" && "$GENERATE_SPDX" != "false" ]]; then
+          echo "::error::generate-spdx must be either 'true' or 'false'."
+          exit 1
+        fi
+
+        if [[ "$GENERATE_CYCLONEDX" != "true" && "$GENERATE_SPDX" != "true" ]]; then
+          echo "::error::At least one SBOM format must be enabled."
+          exit 1
+        fi
+
     - name: Validate Container Image
       shell: bash
       env:

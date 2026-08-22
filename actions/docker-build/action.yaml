@@ -50,6 +50,48 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Validate Docker Build Inputs
+      shell: bash
+      env:
+        CONTEXT: ${{ inputs.context }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        JAR_PATH: ${{ inputs.jar-path }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$CONTEXT" ]]; then
+          echo "::error::Docker build context must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$DOCKERFILE" ]]; then
+          echo "::error::Dockerfile path must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$IMAGE_NAME" ]]; then
+          echo "::error::Image name must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$IMAGE_TAG" ]]; then
+          echo "::error::Image tag must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$JAR_PATH" ]]; then
+          echo "::error::JAR path must not be empty."
+          exit 1
+        fi
+
+        if [[ "$JAR_PATH" = /* ]]; then
+          echo "::error::JAR path must be relative to the Docker build context."
+          echo "::error::Received absolute path: $JAR_PATH"
+          exit 1
+        fi
+
     - name: Validate Docker Build Context
       shell: bash
       env:

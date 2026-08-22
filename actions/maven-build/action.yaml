@@ -17,6 +17,11 @@ inputs:
     required: false
     default: "clean package"
 
+  skip-tests:
+    description: Whether to skip Maven tests during the build.
+    required: false
+    default: "true"
+
   additional-args:
     description: Additional Maven command line arguments.
     required: false
@@ -45,9 +50,7 @@ outputs:
 
 runs:
   using: composite
-
   steps:
-
     - name: Validate Maven Project
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -79,6 +82,24 @@ runs:
 
         java --version
         ./mvnw --version
+
+    - name: Validate Build Configuration
+      shell: bash
+      env:
+        MAVEN_GOALS: ${{ inputs.goals }}
+        SKIP_TESTS: ${{ inputs.skip-tests }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$MAVEN_GOALS" ]]; then
+          echo "::error::Maven goals must not be empty."
+          exit 1
+        fi
+
+        if [[ "$SKIP_TESTS" != "true" && "$SKIP_TESTS" != "false" ]]; then
+          echo "::error::skip-tests must be either 'true' or 'false'."
+          exit 1
+        fi
 
     - name: Read Project Metadata
       id: project-metadata
@@ -136,16 +157,27 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       env:
         MAVEN_GOALS: ${{ inputs.goals }}
+        SKIP_TESTS: ${{ inputs.skip-tests }}
         MAVEN_ADDITIONAL_ARGS: ${{ inputs.additional-args }}
       run: |
         set -euo pipefail
 
         read -r -a GOALS <<< "$MAVEN_GOALS"
 
+        if [[ "${#GOALS[@]}" -eq 0 ]]; then
+          echo "::error::At least one Maven goal must be provided."
+          exit 1
+        fi
+
         MAVEN_ARGS=(
           "${GOALS[@]}"
-          "-DskipTests"
         )
+
+        if [[ "$SKIP_TESTS" == "true" ]]; then
+          MAVEN_ARGS+=(
+            "-DskipTests"
+          )
+        fi
 
         if [[ -n "$MAVEN_ADDITIONAL_ARGS" ]]; then
           read -r -a ADDITIONAL_ARGS <<< "$MAVEN_ADDITIONAL_ARGS"
