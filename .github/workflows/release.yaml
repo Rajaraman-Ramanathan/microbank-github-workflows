@@ -2,10 +2,12 @@ name: Release
 
 on:
   workflow_call:
+
     inputs:
       # ----------------------------------------------------------------
       # Release artifact
       # ----------------------------------------------------------------
+
       image-reference:
         description: >
           Immutable container image reference produced by Branch CI.
@@ -34,19 +36,12 @@ on:
         type: string
 
       # ----------------------------------------------------------------
-      # AWS / DEV release configuration
+      # AWS release configuration
       # ----------------------------------------------------------------
 
       aws-region:
         description: >
-          AWS region used for DEV release operations.
-        required: true
-        type: string
-
-      dev-ecr-repository:
-        description: >
-          ECR repository containing the release image in the DEV AWS account.
-          Example: microbank/account-service
+          AWS region used for release operations.
         required: true
         type: string
 
@@ -74,8 +69,15 @@ on:
         type: string
 
       # ----------------------------------------------------------------
-      # DEV validation
+      # Application validation
       # ----------------------------------------------------------------
+
+      health-path:
+        description: >
+          Application health endpoint used by environment smoke tests.
+        required: false
+        type: string
+        default: "/actuator/health"
 
       dev-application-url:
         description: >
@@ -98,6 +100,25 @@ on:
           Cosign version used for image signing.
         required: true
         type: string
+
+      dev-ecr-registry:
+        description: > 
+          DEV ECR registry hostname.
+        required: true
+        type: string
+
+      stage-ecr-registry:
+        description: >
+          STAGE ECR registry hostname.
+        required: true
+        type: string
+
+    outputs:
+      stage-image-digest:
+        value: ${{ jobs.promote-stage-image.outputs.image-digest }}
+
+      stage-image-reference:
+        value: ${{ jobs.promote-stage-image.outputs.image-reference }}
 
     secrets:
       dev-release-role-arn:
@@ -137,7 +158,7 @@ jobs:
           IMAGE_REFERENCE: ${{ inputs.image-reference }}
           IMAGE_DIGEST: ${{ inputs.image-digest }}
           SOURCE_SHA: ${{ inputs.source-sha }}
-          DEV_ECR_REPOSITORY: ${{ inputs.dev-ecr-repository }}
+          DEV_ECR_REPOSITORY: ${{ inputs.image-repository }}
         run: |
           set -euo pipefail
 
@@ -164,11 +185,6 @@ jobs:
 
           if [[ -z "$SOURCE_SHA" ]]; then
             echo "::error::Source SHA must not be empty."
-            exit 1
-          fi
-
-          if [[ -z "$DEV_ECR_REPOSITORY" ]]; then
-            echo "::error::DEV ECR repository must not be empty."
             exit 1
           fi
 
@@ -297,15 +313,10 @@ jobs:
       - name: Verify DEV ECR Image
         shell: bash
         env:
-          ECR_REPOSITORY: ${{ inputs.dev-ecr-repository }}
+          ECR_REPOSITORY: ${{ inputs.image-repository }}
           IMAGE_DIGEST: ${{ needs.resolve-release.outputs.image-digest }}
         run: |
           set -euo pipefail
-
-          if [[ -z "$ECR_REPOSITORY" ]]; then
-            echo "::error::DEV ECR repository must not be empty."
-            exit 1
-          fi
 
           if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
             echo "::error::Invalid image digest."
@@ -383,3 +394,84 @@ jobs:
           image: ${{ needs.resolve-release.outputs.image-reference }}
           kms-key-uri: ${{ inputs.cosign-kms-key-uri }}
           cosign-version: ${{ inputs.cosign-version }}
+
+  deploy-dev:
+    name: Deploy to DEV
+    needs:
+      - resolve-release
+      - sign-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update DEV GitOps
+        uses: ./actions/gitops-image-update
+        with:
+          gitops-repository: ${{ inputs.gitops-repository }}
+          gitops-branch: ${{ inputs.gitops-branch }}
+          environment: dev
+          service-directory: ${{ inputs.service-directory }}
+          image-digest: ${{ needs.sign-image.outputs.image-digest }}
+          source-sha: ${{ needs.resolve-release.outputs.source-sha }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+  smoke-test-dev:
+    name: DEV Smoke Test
+    needs:
+      - deploy-dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run DEV Smoke Test
+        uses: ./actions/application-testing
+        with:
+          base-url: ${{ inputs.dev-application-url }}
+          health-path: ${{ inputs.health-path }}
+          expected-status: "200"
+          attempts: "12"
+          retry-delay: "10"
+          connect-timeout: "5"
+          request-timeout: "15"
+
+  promote-stage-image:
+    name: Promote Image to STAGE ECR
+    needs:
+      - smoke-test-dev
+    runs-on: ubuntu-latest
+    outputs:
+      image-digest: ${{ steps.ecr-promotion.outputs.image-digest }}
+      image-reference: ${{ steps.ecr-promotion.outputs.image-reference }}
+    steps:
+      - name: Configure STAGE AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ inputs.aws-region }}
+          role-to-assume: ${{ secrets.stage-release-role-arn }}
+
+      - name: Promote Image to STAGE ECR
+        id: ecr-promotion
+        uses: ./actions/ecr-image-promote
+        env:
+          AWS_REGION: ${{ inputs.aws-region }}
+        with:
+          source-registry: ${{ inputs.dev-ecr-registry }}
+          destination-registry: ${{ inputs.stage-ecr-registry }}
+          repository: ${{ inputs.image-repository }}
+          image-digest: ${{ inputs.image-digest }}
+          cosign-version: ${{ inputs.cosign-version }}
+          cosign-kms-key-uri: ${{ inputs.cosign-kms-key-uri }}
+
+  deploy-stage:
+    name: Deploy to STAGE
+    needs:
+      - resolve-release
+      - promote-stage-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update STAGE GitOps
+        uses: ./actions/gitops-image-update
+        with:
+          gitops-repository: ${{ inputs.gitops-repository }}
+          gitops-branch: ${{ inputs.gitops-branch }}
+          environment: stage
+          service-directory: ${{ inputs.service-directory }}
+          image-digest: ${{ needs.promote-stage-image.outputs.image-digest }}
+          source-sha: ${{ needs.resolve-release.outputs.source-sha }}
+          token: ${{ secrets.gitops-token }}

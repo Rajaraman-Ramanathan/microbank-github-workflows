@@ -55,7 +55,6 @@ outputs:
 
 runs:
   using: composite
-
   steps:
     - name: Validate Inputs
       shell: bash
