@@ -1,0 +1,178 @@
+name: Test Suite Runner
+
+description: >
+  Checks out a microservice-specific automated test repository at a
+  specified immutable Git reference and executes one standardized
+  test suite against the target application environment.
+
+author: Microbank Platform Team
+
+inputs:
+  test-repository:
+    description: Dedicated automated test repository.
+    required: true
+
+  test-repository-ref:
+    description: Git reference of the test repository.
+    required: true
+
+  token:
+    description: Read-only token used to checkout the test repository.
+    required: true
+
+  suite:
+    description: Test suite to execute.
+    required: true
+
+  base-url:
+    description: Base URL of the application under test.
+    required: true
+
+  test-environment:
+    description: Target test environment.
+    required: false
+    default: "stage"
+
+  working-directory:
+    description: Directory where the test repository is checked out.
+    required: false
+    default: "test-suite"
+
+  test-results-directory:
+    description: Standard test result directory.
+    required: false
+    default: "test-results"
+
+outputs:
+  test-results-directory:
+    description: Absolute path to the test result directory.
+    value: ${{ steps.results.outputs.test-results-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Test Suite Configuration
+      shell: bash
+      env:
+        TEST_REPOSITORY: ${{ inputs.test-repository }}
+        TEST_REPOSITORY_REF: ${{ inputs.test-repository-ref }}
+        SUITE: ${{ inputs.suite }}
+        BASE_URL: ${{ inputs.base-url }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$TEST_REPOSITORY" ]]; then
+          echo "::error::Test repository must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$TEST_REPOSITORY_REF" ]]; then
+          echo "::error::Test repository reference must not be empty."
+          exit 1
+        fi
+
+        case "$SUITE" in
+          integration|system)
+            ;;
+          *)
+            echo "::error::Unsupported test suite: $SUITE"
+            echo "::error::Supported suites: integration, system"
+            exit 1
+            ;;
+        esac
+
+        if [[ ! "$BASE_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+          echo "::error::Test application base URL must use HTTP or HTTPS."
+          exit 1
+        fi
+
+    - name: Checkout Test Repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.test-repository }}
+        ref: ${{ inputs.test-repository-ref }}
+        token: ${{ inputs.token }}
+        path: ${{ inputs.working-directory }}
+        fetch-depth: 1
+
+    - name: Validate Test Repository Contract
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        RESULTS_DIRECTORY: ${{ inputs.test-results-directory }}
+      run: |
+        set -euo pipefail
+
+        TEST_RUNNER="${WORKING_DIRECTORY}/scripts/run-tests.sh"
+
+        if [[ ! -f "$TEST_RUNNER" ]]; then
+          echo "::error::Test repository contract violation."
+          echo "::error::Expected test runner: $TEST_RUNNER"
+          echo "::error::The test repository must provide:"
+          echo "::error::  ./scripts/run-tests.sh <suite>"
+          exit 1
+        fi
+
+        if [[ ! -s "$TEST_RUNNER" ]]; then
+          echo "::error::Test runner is empty: $TEST_RUNNER"
+          exit 1
+        fi
+
+        chmod +x "$TEST_RUNNER"
+
+        mkdir -p "${WORKING_DIRECTORY}/${RESULTS_DIRECTORY}"
+
+    - name: Execute Test Suite
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SUITE: ${{ inputs.suite }}
+        TEST_BASE_URL: ${{ inputs.base-url }}
+        TEST_ENVIRONMENT: ${{ inputs.test-environment }}
+        TEST_RESULTS_DIRECTORY: ${{ inputs.test-results-directory }}
+      run: |
+        set -euo pipefail
+
+        echo "Executing test suite: $SUITE"
+        echo "Test environment: $TEST_ENVIRONMENT"
+        echo "Application URL: $TEST_BASE_URL"
+        echo "Test results directory: $TEST_RESULTS_DIRECTORY"
+
+        ./scripts/run-tests.sh "$SUITE"
+
+    - name: Verify Test Results
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        RESULTS_DIRECTORY: ${{ inputs.test-results-directory }}
+      run: |
+        set -euo pipefail
+
+        RESULT_PATH="${WORKING_DIRECTORY}/${RESULTS_DIRECTORY}"
+
+        if [[ ! -d "$RESULT_PATH" ]]; then
+          echo "::error::Test result directory was not generated: $RESULT_PATH"
+          exit 1
+        fi
+
+        if ! find "$RESULT_PATH" -type f -print -quit | grep -q .; then
+          echo "::error::Test result directory is empty: $RESULT_PATH"
+          exit 1
+        fi
+
+        echo "Test results generated successfully."
+
+    - name: Expose Test Results
+      id: results
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        RESULTS_DIRECTORY: ${{ inputs.test-results-directory }}
+      run: |
+        set -euo pipefail
+
+        RESULT_PATH="$(realpath "${WORKING_DIRECTORY}/${RESULTS_DIRECTORY}")"
+
+        echo "test-results-directory=$RESULT_PATH" >> "$GITHUB_OUTPUT"
+
+        echo "Test result directory: $RESULT_PATH"

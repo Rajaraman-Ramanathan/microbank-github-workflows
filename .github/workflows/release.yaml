@@ -113,6 +113,56 @@ on:
         required: true
         type: string
 
+      # ----------------------------------------------------------------
+      # STAGE Test Automation
+      # ----------------------------------------------------------------
+
+      test-repository:
+        description: >
+          Dedicated automated test repository for the application.
+          The repository contains integration, system, regression,
+          smoke, and other application-specific test suites.
+        required: true
+        type: string
+
+      test-repository-ref:
+        description: >
+          Immutable Git reference of the test repository to execute.
+          A commit SHA is preferred for release traceability.
+        required: true
+        type: string
+
+      stage-application-url:
+        description: >
+          Base URL of the deployed STAGE application used by the
+          automated integration and system test suites.
+        required: true
+        type: string
+
+      # ----------------------------------------------------------------
+      # Burp Suite DAST
+      # ----------------------------------------------------------------
+
+      burp-server-url:
+        description: >
+          Burp Suite DAST server URL used by CI-driven scans.
+        required: true
+        type: string
+
+      burp-scanner-image:
+        description: >
+          Immutable Burp Suite CI-driven scanner container reference.
+          Pin this to an approved image digest for production use.
+        required: true
+        type: string
+
+      burp-correlation-id:
+        description: >
+          Identifier used to associate the CI-driven scan with a site
+          in Burp Suite DAST.
+        required: true
+        type: string
+
     outputs:
       stage-image-digest:
         value: ${{ jobs.promote-stage-image.outputs.image-digest }}
@@ -129,6 +179,17 @@ on:
       gitops-token:
         description: >
           Credential used to update the GitOps repository.
+        required: true
+
+      test-repository-token:
+        description: >
+          Read-only credential used to checkout the application's
+          dedicated automated test repository.
+        required: true
+
+      burp-api-key:
+        description: >
+          Burp Suite DAST API key used by the CI-driven scanner.
         required: true
 
 permissions:
@@ -475,3 +536,148 @@ jobs:
           image-digest: ${{ needs.promote-stage-image.outputs.image-digest }}
           source-sha: ${{ needs.resolve-release.outputs.source-sha }}
           token: ${{ secrets.gitops-token }}
+
+  integration:
+    name: STAGE Integration Tests
+    needs:
+      - deploy-stage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Integration Test Suite
+        id: integration-tests
+        uses: ./actions/test-suite-runner
+        with:
+          test-repository: ${{ inputs.test-repository }}
+          test-repository-ref: ${{ inputs.test-repository-ref }}
+          token: ${{ secrets.test-repository-token }}
+          suite: integration
+          base-url: ${{ inputs.stage-application-url }}
+          test-environment: stage
+          working-directory: test-suite
+          test-results-directory: test-results
+
+      - name: Upload Integration Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: ${{ steps.integration-tests.outputs.test-results-directory }}
+          if-no-files-found: error
+          retention-days: 30
+
+  system-e2e:
+    name: STAGE System E2E Tests
+    needs:
+      - integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run System E2E Test Suite
+        id: system-tests
+        uses: ./actions/test-suite-runner
+        with:
+          test-repository: ${{ inputs.test-repository }}
+          test-repository-ref: ${{ inputs.test-repository-ref }}
+          token: ${{ secrets.test-repository-token }}
+          suite: system
+          base-url: ${{ inputs.stage-application-url }}
+          test-environment: stage
+          working-directory: test-suite
+          test-results-directory: test-results
+
+      - name: Upload System E2E Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-e2e-test-results
+          path: ${{ steps.system-tests.outputs.test-results-directory }}
+          if-no-files-found: error
+          retention-days: 30
+
+  dast:
+    name: STAGE DAST
+    needs:
+      - system-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Burp Suite DAST
+        id: burp
+        uses: ./actions/burp-dast-scan
+        with:
+          server-url: ${{ inputs.burp-server-url }}
+          api-key: ${{ secrets.burp-api-key }}
+          start-url: ${{ inputs.stage-application-url }}
+          correlation-id: ${{ inputs.burp-correlation-id }}
+          scanner-image: ${{ inputs.burp-scanner-image }}
+          report-directory: .github/reports/burp
+
+      - name: Upload Burp DAST Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: burp-dast-report
+          path: ${{ steps.burp.outputs.junit-report }}
+          if-no-files-found: error
+          retention-days: 30
+
+  stage-release-gate:
+    name: STAGE Release Gate
+    if: always()
+    needs:
+      - integration
+      - system-e2e
+      - dast
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate STAGE Validation
+        shell: bash
+        env:
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          SYSTEM_RESULT: ${{ needs.system-e2e.result }}
+          DAST_RESULT: ${{ needs.dast.result }}
+        run: |
+          set -euo pipefail
+
+          result_icon() {
+            case "$1" in
+              success) echo "✅ Passed" ;;
+              failure) echo "❌ Failed" ;;
+              cancelled) echo "⚠️ Cancelled" ;;
+              skipped) echo "⏭️ Skipped" ;;
+              *) echo "❓ Unknown" ;;
+            esac
+          }
+
+          {
+            echo "# STAGE Release Validation"
+            echo
+            echo "| Validation | Result |"
+            echo "|---|---|"
+            echo "| Integration Tests | $(result_icon "$INTEGRATION_RESULT") |"
+            echo "| System / E2E Tests | $(result_icon "$SYSTEM_RESULT") |"
+            echo "| Burp Suite DAST | $(result_icon "$DAST_RESULT") |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          FAILED=false
+
+          if [[ "$INTEGRATION_RESULT" != "success" ]]; then
+            echo "::error::STAGE integration tests did not pass."
+            FAILED=true
+          fi
+
+          if [[ "$SYSTEM_RESULT" != "success" ]]; then
+            echo "::error::STAGE system/E2E tests did not pass."
+            FAILED=true
+          fi
+
+          if [[ "$DAST_RESULT" != "success" ]]; then
+            echo "::error::STAGE DAST validation did not pass."
+            FAILED=true
+          fi
+
+          if [[ "$FAILED" == "true" ]]; then
+            echo "## STAGE Release Gate: FAILED" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "## STAGE Release Gate: PASSED" >> "$GITHUB_STEP_SUMMARY"
