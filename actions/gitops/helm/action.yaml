@@ -1,0 +1,67 @@
+name: GitOps Helm Validation
+description: Render and validate the GitOps Helm chart for all declared environments.
+
+inputs:
+  service-name:
+    description: Name of the microservice represented by the GitOps repository.
+    required: true
+
+  contract-file:
+    description: Path to the GitOps repository contract.
+    required: false
+    default: .github/gitops.yaml
+
+  helm-version:
+    description: Helm version to install.
+    required: false
+    default: "v3.18.6"
+
+  output-directory:
+    description: Directory where rendered manifests are written.
+    required: false
+    default: .gitops-rendered
+
+outputs:
+  output-directory:
+    description: Directory containing the rendered manifests.
+    value: ${{ steps.render.outputs.output-directory }}
+
+  environments:
+    description: Environments successfully rendered.
+    value: ${{ steps.render.outputs.environments }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: ${{ inputs.helm-version }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        python -m pip install \
+          --disable-pip-version-check \
+          --no-input \
+          "PyYAML==6.0.2"
+
+    - name: Validate and render Helm chart
+      id: render
+      shell: bash
+      env:
+        SERVICE_NAME: ${{ inputs.service-name }}
+        CONTRACT_FILE: ${{ inputs.contract-file }}
+        OUTPUT_DIRECTORY: ${{ inputs.output-directory }}
+      run: |
+        set -euo pipefail
+
+        python "${GITHUB_WORKSPACE}/scripts/gitops/helm/validate.py"

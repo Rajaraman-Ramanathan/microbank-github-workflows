@@ -1,0 +1,49 @@
+name: GitOps Contract Validation
+description: Validate the GitOps repository contract and required repository structure.
+
+inputs:
+  service-name:
+    description: Name of the microservice represented by the GitOps repository.
+    required: true
+
+  contract-file:
+    description: Path to the GitOps repository contract.
+    required: false
+    default: .github/gitops.yaml
+
+outputs:
+  service-name:
+    description: Validated service name.
+    value: ${{ steps.validate.outputs.service-name }}
+
+  application-repository:
+    description: Validated application repository.
+    value: ${{ steps.validate.outputs.application-repository }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        python -m pip install --disable-pip-version-check --no-input \
+          "PyYAML==6.0.2"
+
+    - name: Validate GitOps contract
+      id: validate
+      shell: bash
+      env:
+        SERVICE_NAME: ${{ inputs.service-name }}
+        CONTRACT_FILE: ${{ inputs.contract-file }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+
+        python "${GITHUB_ACTION_PATH}/validate.py"

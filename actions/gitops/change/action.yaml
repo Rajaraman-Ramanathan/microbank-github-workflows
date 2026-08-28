@@ -1,0 +1,70 @@
+name: GitOps Change Validation
+description: >
+  Validate pull request identity and enforce change restrictions
+  for application-generated GitOps changes.
+
+inputs:
+  service-name:
+    description: Name of the microservice represented by the GitOps repository.
+    required: true
+
+  contract-file:
+    description: Path to the GitOps repository contract.
+    required: false
+    default: .github/gitops.yaml
+
+outputs:
+  actor-type:
+    description: Pull request actor type.
+    value: ${{ steps.validate.outputs.actor-type }}
+
+  actor-login:
+    description: Pull request actor login.
+    value: ${{ steps.validate.outputs.actor-login }}
+
+  change-type:
+    description: Classified GitOps change type.
+    value: ${{ steps.validate.outputs.change-type }}
+
+  environments:
+    description: Environments affected by the pull request.
+    value: ${{ steps.validate.outputs.environments }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        python -m pip install \
+          --disable-pip-version-check \
+          --no-input \
+          "PyYAML==6.0.2"
+
+    - name: Validate GitOps change
+      id: validate
+      shell: bash
+      env:
+        SERVICE_NAME: ${{ inputs.service-name }}
+        CONTRACT_FILE: ${{ inputs.contract-file }}
+
+        PR_ACTOR_LOGIN: ${{ github.event.pull_request.user.login }}
+        PR_ACTOR_TYPE: ${{ github.event.pull_request.user.type }}
+
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+        GITHUB_REPOSITORY: ${{ github.repository }}
+
+      run: |
+        set -euo pipefail
+
+        python "${GITHUB_WORKSPACE}/scripts/gitops/change/validate.py"
