@@ -1,0 +1,99 @@
+name: GitOps Validation
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: Name of the microservice represented by the GitOps repository.
+        required: true
+        type: string
+
+      kubernetes-version:
+        description: Kubernetes major/minor version used by the target platform.
+        required: true
+        type: string
+
+      platform-gitops-repository:
+        description: Central GitOps repository containing platform policies.
+        required: false
+        type: string
+        default: microbank/microbank-platform-gitops
+
+      platform-policy-path:
+        description: Path to the Kyverno policy source in the central platform GitOps repository.
+        required: false
+        type: string
+        default: policies
+
+    secrets:
+      PLATFORM_POLICY_APP_PRIVATE_KEY:
+        description: Private key for the read-only platform policy GitHub App.
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: gitops-validate-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate GitOps Repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create platform policy reader token
+        id: platform-policy-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.PLATFORM_POLICY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PLATFORM_POLICY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: microbank-platform-gitops
+          permission-contents: read
+
+      - name: Checkout platform GitOps policies
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.platform-gitops-repository }}
+          token: ${{ steps.platform-policy-token.outputs.token }}
+          path: .platform-gitops
+          sparse-checkout: |
+            ${{ inputs.platform-policy-path }}
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Validate GitOps contract
+        uses: microbank/microbank-github-workflows/actions/gitops/contract@v1
+        with:
+          service-name: ${{ inputs.service-name }}
+
+      - name: Validate GitOps change
+        uses: microbank/microbank-github-workflows/actions/gitops/change@v1
+        with:
+          service-name: ${{ inputs.service-name }}
+
+      - name: Validate and render Helm
+        uses: microbank/microbank-github-workflows/actions/gitops/helm@v1
+        with:
+          service-name: ${{ inputs.service-name }}
+          output-directory: .gitops-rendered
+
+      - name: Validate Kubernetes manifests
+        uses: microbank/microbank-github-workflows/actions/gitops/kubernetes@v1
+        with:
+          rendered-directory: .gitops-rendered
+          kubernetes-version: ${{ inputs.kubernetes-version }}
+
+      - name: Validate platform policies
+        uses: microbank/microbank-github-workflows/actions/gitops/policy@v1
+        with:
+          rendered-directory: .gitops-rendered
+          policy-directory: .platform-gitops/${{ inputs.platform-policy-path }}

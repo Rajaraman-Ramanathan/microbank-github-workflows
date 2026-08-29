@@ -113,6 +113,12 @@ on:
         required: true
         type: string
 
+      prod-ecr-registry:
+        description: >
+          PROD ECR registry hostname.
+        required: true
+        type: string
+
       # ----------------------------------------------------------------
       # STAGE Test Automation
       # ----------------------------------------------------------------
@@ -160,6 +166,13 @@ on:
         description: >
           Identifier used to associate the CI-driven scan with a site
           in Burp Suite DAST.
+        required: true
+        type: string
+
+      production-environment:
+        description: >
+          GitHub Environment used to enforce production approval
+          and deployment protection rules.
         required: true
         type: string
 
@@ -484,3 +497,65 @@ jobs:
         run: |
           chmod +x scripts/release/evaluate-stage-validation.sh
           scripts/release/evaluate-stage-validation.sh
+
+  production-approval:
+    name: Production Approval
+    needs:
+      - stage-release-gate
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.production-environment }}
+    steps:
+      - name: Production Approval Granted
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Production approval granted."
+          echo "Production environment: ${{ inputs.production-environment }}"
+          echo "The release is authorized to proceed to PROD."
+
+  promote-prod-image:
+    name: Promote Image to PROD ECR
+    needs:
+      - production-approval
+    runs-on: ubuntu-latest
+    outputs:
+      image-digest: ${{ steps.ecr-promotion.outputs.image-digest }}
+      image-reference: ${{ steps.ecr-promotion.outputs.image-reference }}
+    steps:
+      - name: Configure PROD AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ inputs.aws-region }}
+          role-to-assume: ${{ secrets.prod-release-role-arn }}
+
+      - name: Promote Image to PROD ECR
+        id: ecr-promotion
+        uses: ./actions/ecr-image-promote
+        env:
+          AWS_REGION: ${{ inputs.aws-region }}
+        with:
+          source-registry: ${{ inputs.stage-ecr-registry }}
+          destination-registry: ${{ inputs.prod-ecr-registry }}
+          repository: ${{ inputs.image-repository }}
+          image-digest: ${{ inputs.image-digest }}
+          cosign-version: ${{ inputs.cosign-version }}
+          cosign-kms-key-uri: ${{ inputs.cosign-kms-key-uri }}
+
+  deploy-prod:
+    name: Deploy to PROD
+    needs:
+      - promote-prod-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update PROD GitOps
+        uses: ./actions/gitops-image-update
+        with:
+          gitops-repository: ${{ inputs.gitops-repository }}
+          gitops-branch: ${{ inputs.gitops-branch }}
+          environment: prod
+          service-directory: ${{ inputs.service-directory }}
+          image-digest: ${{ needs.promote-prod-image.outputs.image-digest }}
+          source-sha: ${{ inputs.source-sha }}
+          token: ${{ secrets.gitops-token }}

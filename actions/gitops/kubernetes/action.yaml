@@ -1,0 +1,79 @@
+name: GitOps Kubernetes Validation
+description: Validate rendered GitOps manifests against Kubernetes API schemas.
+
+inputs:
+  rendered-directory:
+    description: Directory containing manifests rendered by gitops-helm.
+    required: false
+    default: .gitops-rendered
+
+  kubernetes-version:
+    description: Kubernetes version whose API schemas should be used for validation.
+    required: true
+
+  kubeconform-version:
+    description: Kubeconform version to install.
+    required: false
+    default: "0.6.7"
+
+outputs:
+  manifest-count:
+    description: Number of rendered manifest documents validated.
+    value: ${{ steps.validate.outputs.manifest-count }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        python -m pip install \
+          --disable-pip-version-check \
+          --no-input \
+          "PyYAML==6.0.2"
+
+    - name: Install kubeconform
+      shell: bash
+      env:
+        KUBECONFORM_VERSION: ${{ inputs.kubeconform-version }}
+      run: |
+        set -euo pipefail
+
+        archive="kubeconform-linux-amd64.tar.gz"
+        url="https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/${archive}"
+
+        curl --fail --silent --show-error --location \
+          "${url}" \
+          --output "${RUNNER_TEMP}/${archive}"
+
+        tar \
+          --extract \
+          --gzip \
+          --file "${RUNNER_TEMP}/${archive}" \
+          --directory "${RUNNER_TEMP}"
+
+        install \
+          -m 0755 \
+          "${RUNNER_TEMP}/kubeconform" \
+          "${RUNNER_TOOL_CACHE}/kubeconform"
+
+        echo "${RUNNER_TOOL_CACHE}" >> "${GITHUB_PATH}"
+
+    - name: Validate Kubernetes manifests
+      id: validate
+      shell: bash
+      env:
+        RENDERED_DIRECTORY: ${{ inputs.rendered-directory }}
+        KUBERNETES_VERSION: ${{ inputs.kubernetes-version }}
+      run: |
+        set -euo pipefail
+
+        python "${GITHUB_WORKSPACE}/scripts/gitops/kubernetes/validate.py"

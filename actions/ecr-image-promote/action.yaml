@@ -1,36 +1,39 @@
 name: Promote ECR Image
 
 description: >
-  Promotes an immutable, signed container image from a DEV Amazon ECR
-  repository to a STAGE Amazon ECR repository in a different AWS account.
-  The image and its associated Cosign signatures are copied without
-  rebuilding or re-signing the image, and the destination digest and
-  signature are verified.
+  Promotes an immutable, signed container image from one Amazon ECR
+  registry to another ECR registry, potentially across AWS accounts.
+  The image and its associated Cosign OCI artifacts are copied without
+  rebuilding or re-signing the image. The source signature, destination
+  image digest, and destination signature are verified.
 
 author: Microbank Platform Team
 
 inputs:
   source-registry:
     description: >
-      DEV AWS ECR registry hostname.
-      Example: 111111111111.dkr.ecr.ap-south-1.amazonaws.com
+      Source Amazon ECR registry hostname.
+      Example:
+      111111111111.dkr.ecr.ap-south-1.amazonaws.com
     required: true
 
   destination-registry:
     description: >
-      STAGE AWS ECR registry hostname.
-      Example: 222222222222.dkr.ecr.ap-south-1.amazonaws.com
+      Destination Amazon ECR registry hostname.
+      Example:
+      222222222222.dkr.ecr.ap-south-1.amazonaws.com
     required: true
 
   repository:
     description: >
-      ECR repository name shared by the DEV and STAGE repositories.
+      ECR repository name shared by the source and destination
+      repositories.
       Example: microbank/account-service
     required: true
 
   image-digest:
     description: >
-      Immutable SHA-256 digest of the signed image to promote.
+      Immutable SHA-256 digest of the signed container image to promote.
     required: true
 
   cosign-version:
@@ -40,28 +43,27 @@ inputs:
 
   cosign-kms-key-uri:
     description: >
-      AWS KMS URI of the Cosign verification key.
-      The corresponding public key is used to verify the existing signature.
+      AWS KMS URI of the Cosign verification key used to verify the
+      existing image signature.
     required: true
 
 outputs:
   image-digest:
     description: >
-      Immutable digest of the image in STAGE ECR.
+      Immutable digest of the promoted image in the destination ECR.
     value: ${{ steps.verify-destination.outputs.image-digest }}
 
   image-reference:
     description: >
-      Immutable STAGE ECR image reference including the digest.
+      Immutable destination ECR image reference including the digest.
     value: ${{ steps.verify-destination.outputs.image-reference }}
 
 runs:
   using: composite
   steps:
-
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
     # Validate prerequisites
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
 
     - name: Validate AWS CLI
       shell: bash
@@ -75,17 +77,9 @@ runs:
 
         aws --version
 
-    - name: Validate Docker CLI
-      shell: bash
-      run: |
-        set -euo pipefail
-
-        if ! command -v docker >/dev/null 2>&1; then
-          echo "::error::Docker CLI is not available on the runner."
-          exit 1
-        fi
-
-        docker --version
+    # ----------------------------------------------------------------
+    # Validate inputs
+    # ----------------------------------------------------------------
 
     - name: Validate Inputs
       shell: bash
@@ -129,9 +123,14 @@ runs:
           exit 1
         fi
 
-    # ---------------------------------------------------------------
+        if [[ "$SOURCE_REGISTRY" == "$DESTINATION_REGISTRY" ]]; then
+          echo "::error::Source and destination registries must be different."
+          exit 1
+        fi
+
+    # ----------------------------------------------------------------
     # Install approved Cosign version
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
 
     - name: Install Cosign
       shell: bash
@@ -158,11 +157,31 @@ runs:
 
         /tmp/cosign version
 
-        echo "/tmp" >> "$GITHUB_PATH"
-
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
     # Resolve AWS identities
-    # ---------------------------------------------------------------
+    #
+    # The calling workflow has already assumed the destination
+    # environment release role.
+    #
+    # That role must have:
+    #
+    #   Source ECR:
+    #     - ecr:BatchCheckLayerAvailability
+    #     - ecr:BatchGetImage
+    #     - ecr:GetDownloadUrlForLayer
+    #     - ecr:DescribeImages
+    #
+    #   Destination ECR:
+    #     - ecr:BatchCheckLayerAvailability
+    #     - ecr:CompleteLayerUpload
+    #     - ecr:InitiateLayerUpload
+    #     - ecr:PutImage
+    #     - ecr:UploadLayerPart
+    #     - ecr:DescribeImages
+    #
+    # Cross-account access is controlled through IAM and ECR
+    # repository policies.
+    # ----------------------------------------------------------------
 
     - name: Verify AWS Identity
       shell: bash
@@ -171,15 +190,48 @@ runs:
 
         aws sts get-caller-identity
 
-    # ---------------------------------------------------------------
-    # Authenticate to DEV and STAGE ECR
-    #
-    # The calling workflow assumes the STAGE promotion role.
-    # That role must have cross-account read access to DEV ECR and
-    # write access to STAGE ECR.
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # Resolve source and destination registry accounts
+    # ----------------------------------------------------------------
 
-    - name: Login to DEV ECR
+    - name: Resolve Registry Accounts
+      id: registries
+      shell: bash
+      env:
+        SOURCE_REGISTRY: ${{ inputs.source-registry }}
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+      run: |
+        set -euo pipefail
+
+        SOURCE_ACCOUNT="${SOURCE_REGISTRY%%.*}"
+        DESTINATION_ACCOUNT="${DESTINATION_REGISTRY%%.*}"
+
+        if [[ ! "$SOURCE_ACCOUNT" =~ ^[0-9]{12}$ ]]; then
+          echo "::error::Unable to determine a valid source AWS account ID."
+          echo "::error::Source registry: $SOURCE_REGISTRY"
+          exit 1
+        fi
+
+        if [[ ! "$DESTINATION_ACCOUNT" =~ ^[0-9]{12}$ ]]; then
+          echo "::error::Unable to determine a valid destination AWS account ID."
+          echo "::error::Destination registry: $DESTINATION_REGISTRY"
+          exit 1
+        fi
+
+        echo "source-account=$SOURCE_ACCOUNT" >> "$GITHUB_OUTPUT"
+        echo "destination-account=$DESTINATION_ACCOUNT" >> "$GITHUB_OUTPUT"
+
+        echo "Source AWS account:      $SOURCE_ACCOUNT"
+        echo "Destination AWS account: $DESTINATION_ACCOUNT"
+
+    # ----------------------------------------------------------------
+    # Authenticate Cosign to both registries
+    #
+    # Cosign uses the Docker credential configuration created by
+    # aws ecr get-login-password.
+    # ----------------------------------------------------------------
+
+    - name: Login to Source ECR
       shell: bash
       env:
         SOURCE_REGISTRY: ${{ inputs.source-registry }}
@@ -189,12 +241,12 @@ runs:
 
         aws ecr get-login-password \
           --region "$AWS_REGION" |
-        docker login \
+        /tmp/cosign login \
           --username AWS \
           --password-stdin \
           "$SOURCE_REGISTRY"
 
-    - name: Login to STAGE ECR
+    - name: Login to Destination ECR
       shell: bash
       env:
         DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
@@ -204,75 +256,17 @@ runs:
 
         aws ecr get-login-password \
           --region "$AWS_REGION" |
-        docker login \
+        /tmp/cosign login \
           --username AWS \
           --password-stdin \
           "$DESTINATION_REGISTRY"
 
-    # ---------------------------------------------------------------
-    # Source image verification
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # Construct immutable image references
+    # ----------------------------------------------------------------
 
-    - name: Verify DEV Image
-      shell: bash
-      env:
-        SOURCE_REGISTRY: ${{ inputs.source-registry }}
-        REPOSITORY: ${{ inputs.repository }}
-        IMAGE_DIGEST: ${{ inputs.image-digest }}
-        AWS_REGION: ${{ env.AWS_REGION }}
-      run: |
-        set -euo pipefail
-
-        SOURCE_IMAGE="${SOURCE_REGISTRY}/${REPOSITORY}@${IMAGE_DIGEST}"
-
-        ACTUAL_DIGEST="$(
-          aws ecr describe-images \
-            --region "$AWS_REGION" \
-            --registry-id "${SOURCE_REGISTRY%%.*}" \
-            --repository-name "$REPOSITORY" \
-            --image-ids imageDigest="$IMAGE_DIGEST" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text
-        )"
-
-        if [[ "$ACTUAL_DIGEST" != "$IMAGE_DIGEST" ]]; then
-          echo "::error::DEV ECR image digest does not match expected digest."
-          echo "::error::Expected: $IMAGE_DIGEST"
-          echo "::error::Received: $ACTUAL_DIGEST"
-          exit 1
-        fi
-
-        echo "DEV image verified:"
-        echo "  Image: $SOURCE_IMAGE"
-        echo "  Digest: $ACTUAL_DIGEST"
-
-    # ---------------------------------------------------------------
-    # Verify the signed source image BEFORE promotion
-    # ---------------------------------------------------------------
-
-    - name: Verify DEV Image Signature
-      shell: bash
-      env:
-        SOURCE_REGISTRY: ${{ inputs.source-registry }}
-        REPOSITORY: ${{ inputs.repository }}
-        IMAGE_DIGEST: ${{ inputs.image-digest }}
-        COSIGN_KMS_KEY_URI: ${{ inputs.cosign-kms-key-uri }}
-      run: |
-        set -euo pipefail
-
-        SOURCE_IMAGE="${SOURCE_REGISTRY}/${REPOSITORY}@${IMAGE_DIGEST}"
-
-        /tmp/cosign verify \
-          --key "$COSIGN_KMS_KEY_URI" \
-          "$SOURCE_IMAGE"
-
-        echo "DEV image signature verified successfully."
-
-    # ---------------------------------------------------------------
-    # Promote image AND associated Cosign signatures
-    # ---------------------------------------------------------------
-
-    - name: Promote Image and Signatures
+    - name: Resolve Image References
+      id: image
       shell: bash
       env:
         SOURCE_REGISTRY: ${{ inputs.source-registry }}
@@ -285,7 +279,89 @@ runs:
         SOURCE_IMAGE="${SOURCE_REGISTRY}/${REPOSITORY}@${IMAGE_DIGEST}"
         DESTINATION_IMAGE="${DESTINATION_REGISTRY}/${REPOSITORY}@${IMAGE_DIGEST}"
 
-        echo "Promoting:"
+        echo "source-image=$SOURCE_IMAGE" >> "$GITHUB_OUTPUT"
+        echo "destination-image=$DESTINATION_IMAGE" >> "$GITHUB_OUTPUT"
+
+        echo "Source image:"
+        echo "  $SOURCE_IMAGE"
+
+        echo "Destination image:"
+        echo "  $DESTINATION_IMAGE"
+
+    # ----------------------------------------------------------------
+    # Verify source image exists with the expected digest
+    # ----------------------------------------------------------------
+
+    - name: Verify Source Image
+      shell: bash
+      env:
+        SOURCE_ACCOUNT: ${{ steps.registries.outputs.source-account }}
+        REPOSITORY: ${{ inputs.repository }}
+        IMAGE_DIGEST: ${{ inputs.image-digest }}
+        AWS_REGION: ${{ env.AWS_REGION }}
+      run: |
+        set -euo pipefail
+
+        ACTUAL_DIGEST="$(
+          aws ecr describe-images \
+            --region "$AWS_REGION" \
+            --registry-id "$SOURCE_ACCOUNT" \
+            --repository-name "$REPOSITORY" \
+            --image-ids imageDigest="$IMAGE_DIGEST" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text
+        )"
+
+        if [[ "$ACTUAL_DIGEST" != "$IMAGE_DIGEST" ]]; then
+          echo "::error::Source ECR image digest does not match expected digest."
+          echo "::error::Expected: $IMAGE_DIGEST"
+          echo "::error::Received: $ACTUAL_DIGEST"
+          exit 1
+        fi
+
+        echo "Source image verified successfully."
+        echo "Digest: $ACTUAL_DIGEST"
+
+    # ----------------------------------------------------------------
+    # Verify source Cosign signature
+    #
+    # The image must already be signed before promotion.
+    # Promotion never signs or re-signs the image.
+    # ----------------------------------------------------------------
+
+    - name: Verify Source Image Signature
+      shell: bash
+      env:
+        SOURCE_IMAGE: ${{ steps.image.outputs.source-image }}
+        COSIGN_KMS_KEY_URI: ${{ inputs.cosign-kms-key-uri }}
+      run: |
+        set -euo pipefail
+
+        /tmp/cosign verify \
+          --key "$COSIGN_KMS_KEY_URI" \
+          "$SOURCE_IMAGE"
+
+        echo "Source image signature verified successfully."
+
+    # ----------------------------------------------------------------
+    # Promote image and associated OCI artifacts
+    #
+    # cosign copy operates on the specified immutable digest only.
+    # It does not copy other images/tags from the repository.
+    #
+    # Associated Cosign OCI artifacts are copied together with the
+    # specified image.
+    # ----------------------------------------------------------------
+
+    - name: Promote Image and OCI Artifacts
+      shell: bash
+      env:
+        SOURCE_IMAGE: ${{ steps.image.outputs.source-image }}
+        DESTINATION_IMAGE: ${{ steps.image.outputs.destination-image }}
+      run: |
+        set -euo pipefail
+
+        echo "Promoting immutable image:"
         echo "  Source:      $SOURCE_IMAGE"
         echo "  Destination: $DESTINATION_IMAGE"
 
@@ -293,16 +369,17 @@ runs:
           "$SOURCE_IMAGE" \
           "$DESTINATION_IMAGE"
 
-        echo "Image and associated Cosign artifacts promoted successfully."
+        echo "Image and associated OCI artifacts promoted successfully."
 
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
     # Verify destination image digest
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
 
-    - name: Verify STAGE Image
+    - name: Verify Destination Image
       id: verify-destination
       shell: bash
       env:
+        DESTINATION_ACCOUNT: ${{ steps.registries.outputs.destination-account }}
         DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
         REPOSITORY: ${{ inputs.repository }}
         IMAGE_DIGEST: ${{ inputs.image-digest }}
@@ -312,12 +389,10 @@ runs:
 
         DESTINATION_IMAGE="${DESTINATION_REGISTRY}/${REPOSITORY}@${IMAGE_DIGEST}"
 
-        ACCOUNT_ID="${DESTINATION_REGISTRY%%.*}"
-
         ACTUAL_DIGEST="$(
           aws ecr describe-images \
             --region "$AWS_REGION" \
-            --registry-id "$ACCOUNT_ID" \
+            --registry-id "$DESTINATION_ACCOUNT" \
             --repository-name "$REPOSITORY" \
             --image-ids imageDigest="$IMAGE_DIGEST" \
             --query 'imageDetails[0].imageDigest' \
@@ -325,7 +400,7 @@ runs:
         )"
 
         if [[ "$ACTUAL_DIGEST" != "$IMAGE_DIGEST" ]]; then
-          echo "::error::STAGE ECR image digest does not match DEV image digest."
+          echo "::error::Destination ECR image digest does not match source image digest."
           echo "::error::Expected: $IMAGE_DIGEST"
           echo "::error::Received: $ACTUAL_DIGEST"
           exit 1
@@ -334,31 +409,28 @@ runs:
         echo "image-digest=$ACTUAL_DIGEST" >> "$GITHUB_OUTPUT"
         echo "image-reference=$DESTINATION_IMAGE" >> "$GITHUB_OUTPUT"
 
-        echo "STAGE image verified successfully."
-        echo "Image: $DESTINATION_IMAGE"
+        echo "Destination image verified successfully."
+        echo "Image:  $DESTINATION_IMAGE"
         echo "Digest: $ACTUAL_DIGEST"
 
-    # ---------------------------------------------------------------
-    # Verify the promoted Cosign signature in STAGE
-    # ---------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # Verify destination Cosign signature
+    # ----------------------------------------------------------------
 
-    - name: Verify STAGE Image Signature
+    - name: Verify Destination Image Signature
       shell: bash
       env:
-        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
-        REPOSITORY: ${{ inputs.repository }}
-        IMAGE_DIGEST: ${{ inputs.image-digest }}
+        DESTINATION_IMAGE: ${{ steps.image.outputs.destination-image }}
         COSIGN_KMS_KEY_URI: ${{ inputs.cosign-kms-key-uri }}
       run: |
         set -euo pipefail
-
-        DESTINATION_IMAGE="${DESTINATION_REGISTRY}/${REPOSITORY}@${IMAGE_DIGEST}"
 
         /tmp/cosign verify \
           --key "$COSIGN_KMS_KEY_URI" \
           "$DESTINATION_IMAGE"
 
-        echo "STAGE image signature verified successfully."
+        echo "Destination image signature verified successfully."
 
-        echo "The promoted STAGE artifact is:"
+        echo
+        echo "Immutable promoted artifact:"
         echo "  $DESTINATION_IMAGE"

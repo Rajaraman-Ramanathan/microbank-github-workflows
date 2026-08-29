@@ -1,0 +1,69 @@
+name: GitOps Policy Validation
+description: Validate rendered Kubernetes manifests against Microbank platform policies.
+
+inputs:
+  rendered-directory:
+    description: Directory containing manifests rendered by gitops-helm.
+    required: false
+    default: .gitops-rendered
+
+  policy-directory:
+    description: Directory containing the Kyverno policies used for validation.
+    required: true
+
+  kyverno-version:
+    description: Kyverno CLI version to install.
+    required: false
+    default: "1.15.2"
+
+outputs:
+  policy-status:
+    description: Policy validation result.
+    value: ${{ steps.validate.outputs.policy-status }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Install Kyverno CLI
+      shell: bash
+      env:
+        KYVERNO_VERSION: ${{ inputs.kyverno-version }}
+      run: |
+        set -euo pipefail
+
+        archive="kyverno-cli-linux-x86_64.tar.gz"
+
+        url="https://github.com/kyverno/kyverno/releases/download/v${KYVERNO_VERSION}/${archive}"
+
+        curl \
+          --fail \
+          --silent \
+          --show-error \
+          --location \
+          "${url}" \
+          --output "${RUNNER_TEMP}/${archive}"
+
+        tar \
+          --extract \
+          --gzip \
+          --file "${RUNNER_TEMP}/${archive}" \
+          --directory "${RUNNER_TEMP}"
+
+        install \
+          -m 0755 \
+          "${RUNNER_TEMP}/kyverno" \
+          "${RUNNER_TOOL_CACHE}/kyverno"
+
+        echo "${RUNNER_TOOL_CACHE}" >> "${GITHUB_PATH}"
+
+    - name: Validate policies
+      id: validate
+      shell: bash
+      env:
+        RENDERED_DIRECTORY: ${{ inputs.rendered-directory }}
+        POLICY_DIRECTORY: ${{ inputs.policy-directory }}
+      run: |
+        set -euo pipefail
+
+        python "${GITHUB_WORKSPACE}/scripts/gitops/policy/validate.py"
