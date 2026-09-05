@@ -5,7 +5,6 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Any
 
 import yaml
@@ -13,8 +12,8 @@ import yaml
 
 ENVIRONMENTS = {"dev", "stage", "prod"}
 
-APPLICATION_ACTOR_TYPE = "app"
-HUMAN_ACTOR_TYPE = "user"
+EXPECTED_APP_ACTOR_TYPE = "Bot"
+EXPECTED_HUMAN_ACTOR_TYPE = "User"
 
 EXPECTED_APP_PROVIDER = "github-app"
 
@@ -35,6 +34,7 @@ class ChangeContext:
     actor_type: str
     base_sha: str
     head_sha: str
+    head_repository: str
 
 
 def fail(message: str) -> None:
@@ -140,20 +140,16 @@ def get_changed_files(
             continue
 
         parts = line.split("\t")
-
         status = parts[0]
 
-        if status.startswith("R") or status.startswith("C"):
+        if status.startswith(("R", "C")):
             if len(parts) < 3:
                 fail(
                     f"Unexpected git diff output: {line}"
                 )
 
-            old_path = parts[1]
-            new_path = parts[2]
-
-            files.append(old_path)
-            files.append(new_path)
+            files.append(parts[1])
+            files.append(parts[2])
             continue
 
         if len(parts) < 2:
@@ -189,10 +185,21 @@ def load_contract(
 
 def get_application_automation_contract(
     document: dict[str, Any],
-) -> tuple[str, list[str], list[str]]:
+) -> tuple[str, str, list[str], list[str]]:
     spec = require_mapping(
         document.get("spec"),
         "spec",
+    )
+
+    source = require_mapping(
+        spec.get("source"),
+        "spec.source",
+    )
+
+    application_repository = require_string(
+        source,
+        "applicationRepository",
+        "spec.source",
     )
 
     automation = require_mapping(
@@ -248,6 +255,7 @@ def get_application_automation_contract(
     )
 
     return (
+        application_repository,
         actor_slug,
         allowed_paths,
         allowed_fields,
@@ -257,9 +265,11 @@ def get_application_automation_contract(
 def normalize_app_login(login: str) -> str:
     """
     GitHub App PR actors commonly appear as:
+
         my-app[bot]
 
-    The GitOps contract stores the App slug:
+    The GitOps contract stores:
+
         my-app
     """
     return login.removesuffix("[bot]")
@@ -270,7 +280,7 @@ def is_expected_application_actor(
     actor_type: str,
     expected_actor_slug: str,
 ) -> bool:
-    if actor_type != "Bot":
+    if actor_type != EXPECTED_APP_ACTOR_TYPE:
         return False
 
     return (
@@ -305,8 +315,7 @@ def resolve_allowed_path(
     service_name: str,
 ) -> re.Pattern[str]:
     escaped = re.escape(
-        path_template
-        .replace(
+        path_template.replace(
             "{service}",
             service_name,
         )
@@ -344,7 +353,7 @@ def path_is_allowed(
 
         if environment and environment not in ENVIRONMENTS:
             fail(
-                f"Unsupported environment in changed path: "
+                "Unsupported environment in changed path: "
                 f"'{environment}'."
             )
 
@@ -374,7 +383,8 @@ def collect_changes(
     """
     Return JSON Pointer paths whose values changed.
 
-    A changed mapping key is represented by the leaf path.
+    Mapping changes are represented at the changed leaf.
+
     Lists are treated as a single value at their containing path.
     """
 
@@ -389,11 +399,7 @@ def collect_changes(
         for key in keys:
             child_path = (*path, str(key))
 
-            if key not in old:
-                changes.add(json_pointer(child_path))
-                continue
-
-            if key not in new:
+            if key not in old or key not in new:
                 changes.add(json_pointer(child_path))
                 continue
 
@@ -423,9 +429,12 @@ def validate_application_change(
     context: ChangeContext,
     contract: dict[str, Any],
 ) -> tuple[str, str]:
-    expected_actor, allowed_paths, allowed_fields = (
-        get_application_automation_contract(contract)
-    )
+    (
+        application_repository,
+        expected_actor,
+        allowed_paths,
+        allowed_fields,
+    ) = get_application_automation_contract(contract)
 
     if not is_expected_application_actor(
         context.actor_login,
@@ -440,15 +449,27 @@ def validate_application_change(
             f"of type '{context.actor_type}'."
         )
 
+    if context.head_repository != application_repository:
+        fail(
+            "Application automation source repository mismatch. "
+            f"Expected '{application_repository}', "
+            f"got '{context.head_repository}'."
+        )
+
     changed_files = get_changed_files(
         context.base_sha,
         context.head_sha,
     )
 
+    if not changed_files:
+        fail(
+            "Pull request does not contain any changes."
+        )
+
     protected_prefixes = (
-    ".github/",
-    "argocd/",
-    "workloads/",
+        ".github/",
+        "argocd/",
+        "workloads/",
     )
 
     protected_files = [
@@ -461,11 +482,6 @@ def validate_application_change(
         fail(
             "Application automation cannot modify protected "
             f"GitOps paths: {protected_files}"
-        )
-
-    if not changed_files:
-        fail(
-            "Pull request does not contain any changes."
         )
 
     environments: set[str] = set()
@@ -663,6 +679,11 @@ def main() -> int:
         "",
     ).strip()
 
+    head_repository = os.environ.get(
+        "PR_HEAD_REPOSITORY",
+        "",
+    ).strip()
+
     context = ChangeContext(
         service_name=service_name,
         contract_file=contract_file,
@@ -670,6 +691,7 @@ def main() -> int:
         actor_type=actor_type,
         base_sha=base_sha,
         head_sha=head_sha,
+        head_repository=head_repository,
     )
 
     try:
@@ -677,28 +699,42 @@ def main() -> int:
             fail("SERVICE_NAME is required.")
 
         if not context.actor_login:
-            fail("Pull request actor login is unavailable.")
+            fail(
+                "Pull request actor login is unavailable."
+            )
 
         if not context.actor_type:
-            fail("Pull request actor type is unavailable.")
+            fail(
+                "Pull request actor type is unavailable."
+            )
 
         if not context.base_sha:
-            fail("Pull request base SHA is unavailable.")
+            fail(
+                "Pull request base SHA is unavailable."
+            )
 
         if not context.head_sha:
-            fail("Pull request head SHA is unavailable.")
+            fail(
+                "Pull request head SHA is unavailable."
+            )
 
         contract = load_contract(
             context.contract_file,
             context.head_sha,
         )
 
-        if context.actor_type == "User":
+        if context.actor_type == EXPECTED_HUMAN_ACTOR_TYPE:
             change_type, environment = (
                 validate_human_change(context)
             )
 
-        elif context.actor_type == "Bot":
+        elif context.actor_type == EXPECTED_APP_ACTOR_TYPE:
+            if not context.head_repository:
+                fail(
+                    "Application automation source repository "
+                    "identity is unavailable."
+                )
+
             change_type, environment = (
                 validate_application_change(
                     context,
@@ -715,7 +751,7 @@ def main() -> int:
         write_outputs(
             actor_type=(
                 "user"
-                if context.actor_type == "User"
+                if context.actor_type == EXPECTED_HUMAN_ACTOR_TYPE
                 else "app"
             ),
             actor_login=context.actor_login,
@@ -723,10 +759,18 @@ def main() -> int:
             environment=environment,
         )
 
-        print("GitOps change validation passed.")
-        print(f"Actor       : {context.actor_login}")
-        print(f"Actor type  : {context.actor_type}")
-        print(f"Change type : {change_type}")
+        print(
+            "GitOps change validation passed."
+        )
+        print(
+            f"Actor       : {context.actor_login}"
+        )
+        print(
+            f"Actor type  : {context.actor_type}"
+        )
+        print(
+            f"Change type : {change_type}"
+        )
         print(
             "Environment : "
             f"{environment or 'not environment-specific'}"

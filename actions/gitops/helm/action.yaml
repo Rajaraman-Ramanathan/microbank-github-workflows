@@ -64,4 +64,4 @@ runs:
       run: |
         set -euo pipefail
 
-        python "${GITHUB_WORKSPACE}/scripts/gitops/helm/validate.py"
+        python "${GITHUB_ACTION_PATH}/../../../scripts/gitops/helm/validate.py"

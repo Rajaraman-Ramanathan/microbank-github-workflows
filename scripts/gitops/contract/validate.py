@@ -64,7 +64,10 @@ def require_string_list(
     if not isinstance(value, list) or not value:
         fail(f"{path}.{key} must be a non-empty list.")
 
-    if not all(isinstance(item, str) and item.strip() for item in value):
+    if not all(
+        isinstance(item, str) and item.strip()
+        for item in value
+    ):
         fail(
             f"{path}.{key} must contain only non-empty strings."
         )
@@ -75,7 +78,7 @@ def require_string_list(
 def validate_contract(
     document: dict[str, Any],
     service_name: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     api_version = document.get("apiVersion")
 
     if api_version != EXPECTED_API_VERSION:
@@ -152,7 +155,8 @@ def validate_contract(
 
     if len(environments) != len(set(environments)):
         fail(
-            "spec.deployment.environments must not contain duplicates."
+            "spec.deployment.environments must not contain "
+            "duplicates."
         )
 
     missing_environments = [
@@ -217,10 +221,13 @@ def validate_contract(
         service=service_name,
     )
 
-    if expected_path not in allowed_paths:
+    if (
+        len(allowed_paths) != 1
+        or allowed_paths[0] != expected_path
+    ):
         fail(
-            "Application automation must allow exactly the "
-            "standard service values path: "
+            "Application automation allowedPaths must contain "
+            "exactly "
             f"'{expected_path}'."
         )
 
@@ -230,16 +237,20 @@ def validate_contract(
         "spec.applicationAutomation",
     )
 
-    if "/image/digest" not in allowed_fields:
+    if (
+        len(allowed_fields) != 1
+        or allowed_fields[0] != "/image/digest"
+    ):
         fail(
-            "Application automation must allow "
-            "'/image/digest'."
+            "Application automation allowedFields must contain "
+            "exactly '/image/digest'."
         )
 
     return {
         "application_repository": application_repository,
         "chart_path": chart_path,
         "actor_slug": actor_slug,
+        "environments": environments,
     }
 
 
@@ -257,7 +268,7 @@ def validate_repository_structure(
 
     if not contract_file.is_file():
         fail(
-            f"Required contract file does not exist: "
+            "Required contract file does not exist: "
             f"{contract_file}"
         )
 
@@ -300,7 +311,11 @@ def set_github_outputs(
     if not output_file:
         return
 
-    with open(output_file, "a", encoding="utf-8") as output:
+    with open(
+        output_file,
+        "a",
+        encoding="utf-8",
+    ) as output:
         output.write(
             f"service-name={os.environ['SERVICE_NAME']}\n"
         )
@@ -311,7 +326,10 @@ def set_github_outputs(
 
 
 def main() -> int:
-    service_name = os.environ.get("SERVICE_NAME", "").strip()
+    service_name = os.environ.get(
+        "SERVICE_NAME",
+        "",
+    ).strip()
 
     if not service_name:
         print(
@@ -330,7 +348,7 @@ def main() -> int:
     try:
         if not contract_file.is_file():
             fail(
-                f"GitOps contract file does not exist: "
+                "GitOps contract file does not exist: "
                 f"{contract_file}"
             )
 
@@ -341,41 +359,31 @@ def main() -> int:
             document = yaml.safe_load(file)
 
         if not isinstance(document, dict):
-            fail("GitOps contract must contain a YAML mapping.")
+            fail(
+                "GitOps contract must contain a YAML mapping."
+            )
 
         result = validate_contract(
             document,
             service_name,
         )
 
-        spec = require_mapping(
-            document["spec"],
-            "spec",
-        )
-
-        deployment = require_mapping(
-            spec["deployment"],
-            "spec.deployment",
-        )
-
-        environments = require_string_list(
-            deployment,
-            "environments",
-            "spec.deployment",
-        )
-
         validate_repository_structure(
             service_name=service_name,
             chart_path=result["chart_path"],
-            environments=environments,
+            environments=result["environments"],
         )
 
         set_github_outputs(
             result["application_repository"],
         )
 
-        print("GitOps contract validation passed.")
-        print(f"Service: {service_name}")
+        print(
+            "GitOps contract validation passed."
+        )
+        print(
+            f"Service: {service_name}"
+        )
         print(
             "Application repository: "
             f"{result['application_repository']}"
@@ -386,7 +394,7 @@ def main() -> int:
         )
         print(
             "Supported environments: "
-            f"{', '.join(environments)}"
+            f"{', '.join(result['environments'])}"
         )
         print(
             "Helm chart: "
@@ -404,7 +412,8 @@ def main() -> int:
 
     except yaml.YAMLError as exc:
         print(
-            f"::error::Invalid YAML in {contract_file}: {exc}",
+            f"::error::Invalid YAML in "
+            f"{contract_file}: {exc}",
             file=sys.stderr,
         )
         return 1

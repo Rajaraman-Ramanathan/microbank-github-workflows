@@ -26,9 +26,9 @@ outputs:
     description: Classified GitOps change type.
     value: ${{ steps.validate.outputs.change-type }}
 
-  environments:
-    description: Environments affected by the pull request.
-    value: ${{ steps.validate.outputs.environments }}
+  environment:
+    description: Environment affected by the pull request.
+    value: ${{ steps.validate.outputs.environment }}
 
 runs:
   using: composite
@@ -67,4 +67,4 @@ runs:
       run: |
         set -euo pipefail
 
-        python "${GITHUB_WORKSPACE}/scripts/gitops/change/validate.py"
+        python "${GITHUB_ACTION_PATH}/../../../scripts/gitops/change/validate.py"

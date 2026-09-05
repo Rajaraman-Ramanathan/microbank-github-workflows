@@ -1,0 +1,411 @@
+name: Argo Rollout Validation
+
+description: >
+  Waits for an Argo Rollout to complete successfully using the Argo Rollouts
+  CLI, verifies that the rollout is healthy, and confirms that the expected
+  immutable container image digest is configured in the rollout.
+
+author: Microbank Platform Team
+
+inputs:
+  namespace:
+    description: Kubernetes namespace containing the Argo Rollout.
+    required: true
+
+  rollout-name:
+    description: Name of the Argo Rollout resource.
+    required: true
+
+  image-repository:
+    description: >
+      Expected container image repository.
+      Example:
+      123456789012.dkr.ecr.ap-south-1.amazonaws.com/microbank/account-service
+    required: true
+
+  image-digest:
+    description: >
+      Expected immutable SHA-256 image digest.
+    required: true
+
+  argo-rollouts-version:
+    description: >
+      Approved Argo Rollouts kubectl plugin version.
+      Pin to an approved immutable release version.
+      Example: v1.8.3
+    required: false
+    default: "v1.8.3"
+
+  timeout-seconds:
+    description: >
+      Maximum time in seconds to wait for the Argo Rollout to complete.
+    required: false
+    default: "900"
+
+outputs:
+  rollout-name:
+    description: Validated Argo Rollout name.
+    value: ${{ steps.validate.outputs.rollout-name }}
+
+  rollout-phase:
+    description: Final Argo Rollout phase.
+    value: ${{ steps.validate.outputs.rollout-phase }}
+
+  image:
+    description: Container image configured in the Rollout.
+    value: ${{ steps.validate.outputs.image }}
+
+  image-digest:
+    description: Container image digest found in the Rollout.
+    value: ${{ steps.validate.outputs.image-digest }}
+
+runs:
+  using: composite
+
+  steps:
+
+    # ----------------------------------------------------------------
+    # Validate prerequisites
+    # ----------------------------------------------------------------
+
+    - name: Validate kubectl
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v kubectl >/dev/null 2>&1; then
+          echo "::error::kubectl is not available on the runner."
+          echo "::error::The calling workflow must configure Kubernetes access before using this action."
+          exit 1
+        fi
+
+        kubectl version --client
+
+    # ----------------------------------------------------------------
+    # Validate inputs
+    # ----------------------------------------------------------------
+
+    - name: Validate Inputs
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        ROLLOUT_NAME: ${{ inputs.rollout-name }}
+        IMAGE_REPOSITORY: ${{ inputs.image-repository }}
+        IMAGE_DIGEST: ${{ inputs.image-digest }}
+        ARGO_ROLLOUTS_VERSION: ${{ inputs.argo-rollouts-version }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$NAMESPACE" ]]; then
+          echo "::error::Kubernetes namespace must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$ROLLOUT_NAME" ]]; then
+          echo "::error::Argo Rollout name must not be empty."
+          exit 1
+        fi
+
+        if [[ -z "$IMAGE_REPOSITORY" ]]; then
+          echo "::error::Expected image repository must not be empty."
+          exit 1
+        fi
+
+        if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+          echo "::error::Invalid image digest: $IMAGE_DIGEST"
+          exit 1
+        fi
+
+        if [[ -z "$ARGO_ROLLOUTS_VERSION" ]]; then
+          echo "::error::Argo Rollouts version must not be empty."
+          exit 1
+        fi
+
+        if [[ ! "$ARGO_ROLLOUTS_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::Invalid Argo Rollouts version: $ARGO_ROLLOUTS_VERSION"
+          echo "::error::Expected format: v<major>.<minor>.<patch>"
+          exit 1
+        fi
+
+        if [[ ! "$TIMEOUT_SECONDS" =~ ^[0-9]+$ ||
+              "$TIMEOUT_SECONDS" -lt 1 ]]; then
+          echo "::error::Timeout must be a positive integer."
+          exit 1
+        fi
+
+    # ----------------------------------------------------------------
+    # Install approved Argo Rollouts kubectl plugin
+    # ----------------------------------------------------------------
+
+    - name: Install Argo Rollouts CLI
+      shell: bash
+      env:
+        ARGO_ROLLOUTS_VERSION: ${{ inputs.argo-rollouts-version }}
+      run: |
+        set -euo pipefail
+
+        ARCH="$(uname -m)"
+
+        case "$ARCH" in
+          x86_64)
+            BINARY_ARCH="amd64"
+            ;;
+
+          aarch64|arm64)
+            BINARY_ARCH="arm64"
+            ;;
+
+          *)
+            echo "::error::Unsupported runner architecture: $ARCH"
+            exit 1
+            ;;
+        esac
+
+        DOWNLOAD_URL="https://github.com/argoproj/argo-rollouts/releases/download/${ARGO_ROLLOUTS_VERSION}/kubectl-argo-rollouts-linux-${BINARY_ARCH}"
+
+        echo "Installing Argo Rollouts CLI:"
+        echo "  Version: $ARGO_ROLLOUTS_VERSION"
+        echo "  Architecture: $BINARY_ARCH"
+
+        curl \
+          --fail \
+          --silent \
+          --show-error \
+          --location \
+          "$DOWNLOAD_URL" \
+          --output /tmp/kubectl-argo-rollouts
+
+        chmod +x /tmp/kubectl-argo-rollouts
+
+        if ! /tmp/kubectl-argo-rollouts version; then
+          echo "::error::Installed Argo Rollouts CLI failed version validation."
+          exit 1
+        fi
+
+        echo "/tmp" >> "$GITHUB_PATH"
+
+    # ----------------------------------------------------------------
+    # Verify Kubernetes connectivity
+    # ----------------------------------------------------------------
+
+    - name: Verify Kubernetes Context
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! kubectl cluster-info >/dev/null 2>&1; then
+          echo "::error::Unable to connect to the Kubernetes cluster."
+          echo "::error::The calling workflow must configure Kubernetes access before using this action."
+          exit 1
+        fi
+
+        echo "Kubernetes cluster connectivity verified."
+
+    # ----------------------------------------------------------------
+    # Verify Rollout exists
+    # ----------------------------------------------------------------
+
+    - name: Verify Rollout Exists
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        ROLLOUT_NAME: ${{ inputs.rollout-name }}
+      run: |
+        set -euo pipefail
+
+        if ! kubectl get rollout "$ROLLOUT_NAME" \
+          --namespace "$NAMESPACE" >/dev/null 2>&1; then
+
+          echo "::error::Argo Rollout was not found."
+          echo "::error::Namespace: $NAMESPACE"
+          echo "::error::Rollout: $ROLLOUT_NAME"
+          exit 1
+        fi
+
+        echo "Argo Rollout found:"
+        kubectl get rollout \
+          "$ROLLOUT_NAME" \
+          --namespace "$NAMESPACE"
+
+    # ----------------------------------------------------------------
+    # Wait for Argo Rollout completion
+    #
+    # Argo Rollouts owns:
+    #
+    #   - Canary progression
+    #   - Istio traffic shifting
+    #   - Analysis
+    #   - Abort / rollback
+    #   - Final promotion
+    #
+    # The CLI waits until the rollout reaches a terminal result.
+    # It returns success only when the rollout is Healthy.
+    # ----------------------------------------------------------------
+
+    - name: Wait for Argo Rollout Completion
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        ROLLOUT_NAME: ${{ inputs.rollout-name }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        echo "Waiting for Argo Rollout to complete..."
+        echo "Namespace: $NAMESPACE"
+        echo "Rollout:   $ROLLOUT_NAME"
+        echo "Timeout:   ${TIMEOUT_SECONDS}s"
+
+        if ! kubectl argo rollouts status \
+          "$ROLLOUT_NAME" \
+          --namespace "$NAMESPACE" \
+          --timeout "${TIMEOUT_SECONDS}s"; then
+
+          echo "::error::Argo Rollout did not complete successfully."
+
+          echo
+          echo "Final Argo Rollout state:"
+          kubectl argo rollouts get rollout \
+            "$ROLLOUT_NAME" \
+            --namespace "$NAMESPACE" || true
+
+          exit 1
+        fi
+
+        echo "Argo Rollout completed successfully."
+
+    # ----------------------------------------------------------------
+    # Validate final rollout and release image
+    # ----------------------------------------------------------------
+
+    - name: Validate Rollout
+      id: validate
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        ROLLOUT_NAME: ${{ inputs.rollout-name }}
+        IMAGE_REPOSITORY: ${{ inputs.image-repository }}
+        IMAGE_DIGEST: ${{ inputs.image-digest }}
+      run: |
+        set -euo pipefail
+
+        echo "Validating completed Argo Rollout..."
+        echo "  Namespace:       $NAMESPACE"
+        echo "  Rollout:         $ROLLOUT_NAME"
+        echo "  Expected image:  $IMAGE_REPOSITORY"
+        echo "  Expected digest: $IMAGE_DIGEST"
+
+        # ------------------------------------------------------------
+        # Validate final rollout phase
+        # ------------------------------------------------------------
+
+        ROLLOUT_PHASE="$(
+          kubectl get rollout \
+            "$ROLLOUT_NAME" \
+            --namespace "$NAMESPACE" \
+            -o jsonpath='{.status.phase}'
+        )"
+
+        if [[ "$ROLLOUT_PHASE" != "Healthy" ]]; then
+          echo "::error::Argo Rollout did not complete in Healthy state."
+          echo "::error::Expected phase: Healthy"
+          echo "::error::Actual phase:   ${ROLLOUT_PHASE:-<empty>}"
+          exit 1
+        fi
+
+        echo "Final rollout phase: $ROLLOUT_PHASE"
+
+        # ------------------------------------------------------------
+        # Resolve configured container images
+        # ------------------------------------------------------------
+
+        mapfile -t CONTAINER_IMAGES < <(
+          kubectl get rollout \
+            "$ROLLOUT_NAME" \
+            --namespace "$NAMESPACE" \
+            -o jsonpath='{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}'
+        )
+
+        if [[ "${#CONTAINER_IMAGES[@]}" -eq 0 ]]; then
+          echo "::error::No container images were found in the Argo Rollout."
+          exit 1
+        fi
+
+        echo
+        echo "Configured container images:"
+        printf '  %s\n' "${CONTAINER_IMAGES[@]}"
+
+        # ------------------------------------------------------------
+        # Find expected repository and immutable digest
+        #
+        # Supported forms:
+        #
+        # repository@sha256:<digest>
+        # repository:tag@sha256:<digest>
+        # ------------------------------------------------------------
+
+        MATCHED_IMAGE=""
+        MATCHED_DIGEST=""
+
+        for IMAGE in "${CONTAINER_IMAGES[@]}"; do
+
+          IMAGE_WITHOUT_DIGEST="$IMAGE"
+          IMAGE_IMAGE_DIGEST=""
+
+          if [[ "$IMAGE" == *@* ]]; then
+            IMAGE_WITHOUT_DIGEST="${IMAGE%@*}"
+            IMAGE_IMAGE_DIGEST="${IMAGE##*@}"
+          fi
+
+          IMAGE_REPOSITORY_PART="$IMAGE_WITHOUT_DIGEST"
+
+          LAST_COMPONENT="${IMAGE_WITHOUT_DIGEST##*/}"
+
+          if [[ "$LAST_COMPONENT" == *:* ]]; then
+            IMAGE_REPOSITORY_PART="${IMAGE_WITHOUT_DIGEST%:*}"
+          fi
+
+          if [[ "$IMAGE_REPOSITORY_PART" != "$IMAGE_REPOSITORY" ]]; then
+            continue
+          fi
+
+          if [[ "$IMAGE_IMAGE_DIGEST" != "$IMAGE_DIGEST" ]]; then
+            continue
+          fi
+
+          MATCHED_IMAGE="$IMAGE"
+          MATCHED_DIGEST="$IMAGE_IMAGE_DIGEST"
+          break
+        done
+
+        # ------------------------------------------------------------
+        # Reject unexpected release image
+        # ------------------------------------------------------------
+
+        if [[ -z "$MATCHED_IMAGE" ]]; then
+          echo "::error::Expected image repository and digest were not found in the completed Rollout."
+          echo "::error::Expected repository: $IMAGE_REPOSITORY"
+          echo "::error::Expected digest:     $IMAGE_DIGEST"
+          echo "::error::Configured images:"
+
+          printf '::error::  %s\n' "${CONTAINER_IMAGES[@]}"
+
+          exit 1
+        fi
+
+        # ------------------------------------------------------------
+        # Export outputs
+        # ------------------------------------------------------------
+
+        echo "rollout-name=$ROLLOUT_NAME" >> "$GITHUB_OUTPUT"
+        echo "rollout-phase=$ROLLOUT_PHASE" >> "$GITHUB_OUTPUT"
+        echo "image=$MATCHED_IMAGE" >> "$GITHUB_OUTPUT"
+        echo "image-digest=$MATCHED_DIGEST" >> "$GITHUB_OUTPUT"
+
+        echo
+        echo "Argo Rollout validation passed."
+        echo "Rollout: $ROLLOUT_NAME"
+        echo "Phase:   $ROLLOUT_PHASE"
+        echo "Image:   $MATCHED_IMAGE"
+        echo "Digest:  $MATCHED_DIGEST"

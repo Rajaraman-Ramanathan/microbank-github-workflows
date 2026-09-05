@@ -46,4 +46,4 @@ runs:
       run: |
         set -euo pipefail
 
-        python "${GITHUB_ACTION_PATH}/validate.py"
+        python "${GITHUB_ACTION_PATH}/../../../scripts/gitops/contract/validate.py"

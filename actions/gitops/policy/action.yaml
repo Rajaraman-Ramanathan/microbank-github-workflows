@@ -66,4 +66,4 @@ runs:
       run: |
         set -euo pipefail
 
-        python "${GITHUB_WORKSPACE}/scripts/gitops/policy/validate.py"
+        python "${GITHUB_ACTION_PATH}/../../../scripts/gitops/policy/validate.py"

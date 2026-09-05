@@ -176,6 +176,21 @@ on:
         required: true
         type: string
 
+      prod-namespace:
+        description: Kubernetes namespace containing the PROD Argo Rollout.
+        required: true
+        type: string
+
+      prod-kube-context:
+        description: Kubernetes context used to access the PROD cluster.
+        required: true
+        type: string
+
+      prod-application-url:
+        description: Base URL used for PROD application smoke testing.
+        required: true
+        type: string
+
     outputs:
       stage-image-digest:
         value: ${{ jobs.promote-stage-image.outputs.image-digest }}
@@ -559,3 +574,104 @@ jobs:
           image-digest: ${{ needs.promote-prod-image.outputs.image-digest }}
           source-sha: ${{ inputs.source-sha }}
           token: ${{ secrets.gitops-token }}
+
+  validate-prod:
+    name: Validate PROD Deployment
+    needs:
+      - deploy-prod
+      - promote-prod-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PROD Argo Rollout
+        uses: ./actions/argo-rollout-validation
+        with:
+          namespace: ${{ inputs.prod-namespace }}
+          rollout-name: ${{ inputs.service-directory }}
+          image-repository: ${{ inputs.image-repository }}
+          image-digest: ${{ needs.promote-prod-image.outputs.image-digest }}
+          kube-context: ${{ inputs.prod-kube-context }}
+
+  prod-smoke-test:
+    name: PROD Smoke Tests
+    needs:
+    - validate-prod
+    runs-on: ubuntu-latest
+    steps:
+    - name: Run PROD Smoke Test Suite
+      id: prod-smoke
+      uses: ./actions/test-suite-runner
+      with:
+        test-repository: ${{ inputs.test-repository }}
+        test-repository-ref: ${{ inputs.test-repository-ref }}
+        token: ${{ secrets.test-repository-token }}
+        suite: smoke
+        base-url: ${{ inputs.prod-application-url }}
+        test-environment: prod
+        working-directory: test-suite
+        test-results-directory: test-results
+
+    - name: Upload PROD Smoke Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: prod-smoke-test-results
+        path: ${{ steps.prod-smoke.outputs.test-results-directory }}
+        if-no-files-found: error
+        retention-days: 30
+
+  release-summary:
+    name: Release Summary
+    if: always()
+    needs:
+    - verify-dev-image
+    - sign-image
+    - deploy-dev
+    - smoke-test-dev
+    - promote-stage-image
+    - deploy-stage
+    - integration
+    - system-e2e
+    - dast
+    - promote-prod-image
+    - deploy-prod
+    - validate-prod
+    - prod-smoke-test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Workflow Repository
+      uses: actions/checkout@v4
+
+    - name: Generate Release Summary
+      shell: bash
+      env:
+        SOURCE_SHA: ${{ inputs.source-sha }}
+        IMAGE_REPOSITORY: ${{ inputs.image-repository }}
+        IMAGE_DIGEST: ${{ inputs.image-digest }}
+
+        VERIFY_DEV_RESULT: ${{ needs.verify-dev-image.result }}
+        PROMOTE_STAGE_RESULT: ${{ needs.promote-stage-image.result }}
+        PROMOTE_PROD_RESULT: ${{ needs.promote-prod-image.result }}
+
+        DEPLOY_DEV_RESULT: ${{ needs.deploy-dev.result }}
+        DEV_SMOKE_RESULT: ${{ needs.smoke-test-dev.result }}
+        DEPLOY_STAGE_RESULT: ${{ needs.deploy-stage.result }}
+        DEPLOY_PROD_RESULT: ${{ needs.deploy-prod.result }}
+
+        INTEGRATION_RESULT: ${{ needs.integration.result }}
+        SYSTEM_E2E_RESULT: ${{ needs.system-e2e.result }}
+        DAST_RESULT: ${{ needs.dast.result }}
+
+        VALIDATE_PROD_RESULT: ${{ needs.validate-prod.result }}
+        PROD_SMOKE_RESULT: ${{ needs.prod-smoke-test.result }}
+
+        PROD_IMAGE_REFERENCE: ${{ needs.promote-prod-image.outputs.image-reference }}
+        PROD_IMAGE_DIGEST: ${{ needs.promote-prod-image.outputs.image-digest }}
+
+        RELEASE_STATUS: ${{ needs.prod-smoke-test.result }}
+
+      run: |
+        set -euo pipefail
+
+        chmod +x scripts/release-summary.sh
+
+        ./scripts/release-summary.sh

@@ -72,11 +72,11 @@ runs:
         fi
 
         case "$SUITE" in
-          integration|system)
+          integration|system|smoke)
             ;;
           *)
             echo "::error::Unsupported test suite: $SUITE"
-            echo "::error::Supported suites: integration, system"
+            echo "::error::Supported suites: integration, system, smoke"
             exit 1
             ;;
         esac
